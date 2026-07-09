@@ -13,6 +13,7 @@ if (process.env.NODE_ENV !== 'production') {
 export async function connectDatabase() {
   try {
     await prisma.$connect();
+    await prisma.$queryRaw`SELECT 1`;
     const env = process.env.NODE_ENV || 'development';
     console.log(`[DATABASE] ✅ Successfully connected to PostgreSQL via Prisma (${env}).`);
   } catch (error) {
