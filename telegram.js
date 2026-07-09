@@ -105,6 +105,14 @@ export async function editMessage(chatId, messageId, text, options = {}) {
   });
 }
 
+export async function editMessageReplyMarkup(chatId, messageId, replyMarkup) {
+  return apiRequest('editMessageReplyMarkup', {
+    chat_id: chatId,
+    message_id: messageId,
+    reply_markup: replyMarkup
+  });
+}
+
 /**
  * Deletes a message from a chat.
  */
@@ -162,10 +170,10 @@ export async function getChatMember(chatId, userId) {
 /**
  * Sets the webhook URL for the bot.
  */
-export async function setWebhook(url, options = {}) {
+export async function setWebhook(url, secret) {
   return apiRequest('setWebhook', {
     url,
-    ...options
+    secret_token: secret
   });
 }
 
