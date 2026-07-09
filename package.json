@@ -1,0 +1,33 @@
+{
+  "name": "telegram-otp-bot-v2",
+  "version": "2.0.0",
+  "description": "Production-ready Telegram OTP Bot V2 engine utilizing Fastify, Prisma ORM, and PostgreSQL",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "otp",
+    "fastify",
+    "prisma",
+    "postgresql"
+  ],
+  "dependencies": {
+    "@prisma/client": "^5.11.0",
+    "dotenv": "^16.4.5",
+    "fastify": "^4.26.2"
+  },
+  "devDependencies": {
+    "prisma": "^5.11.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "private": true
+}
