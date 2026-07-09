@@ -36,8 +36,9 @@ const config = {
     forceJoinGroup: requireEnv('FORCE_JOIN_GROUP')
   },
   sms: {
-    apiToken: requireEnv('SMS_API_TOKEN')
-  },
+  apiKey: requireEnv('SMS_API_TOKEN'),
+  baseUrl: 'https://api.temporasms.com/stubs/handler_api.php'
+},
   database: {
     url: requireEnv('DATABASE_URL')
   },
