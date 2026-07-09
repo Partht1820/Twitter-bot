@@ -1,0 +1,43 @@
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Diagnostic reports (node_modules etc)
+reports
+errors
+coverage/
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Dist / Build outputs
+dist/
+.cache/
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Database files (Local Prisma SQLite overrides if present)
+prisma/dev.db
+prisma/dev.db-journal
+
+# Editor directories and files
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS Files
+.DS_Store
+Thumbs.db
