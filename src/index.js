@@ -34,7 +34,7 @@ const MSG = {
   VERIFIED_SUCCESS: "✅ <b>Verification Successful</b>\n\nWelcome aboard! You now have full access to the bot.",
   VERIFIED_FAILED: "❌ <b>Verification Failed</b>\n\nWe couldn't verify your membership.",
   PURCHASING: "🔄 <b>Purchasing Number...</b>\n\nPlease wait while we reserve a number for you.",
-  NUMBER_SUCCESS: "✅ <b>Number Activated</b>\n\n🇺🇸 United States • 🐦 Twitter\n\n📞 <code>+{phoneNumber}</code>\n\n💳 ₹{amount}\n\n💡 <b>Refund Policy</b>\n• 0 OTP → Full Refund\n• 1+ OTP → No Refund",
+  NUMBER_SUCCESS: "✅ <b>Number Activated</b>\n\n🇺🇸 United States • 🐦 Twitter\n\n📞 <code>+1{phoneNumber}</code>\n\n💳 ₹{amount}\n\n💡 <b>Refund Policy</b>\n• 0 OTP → Full Refund\n• 1+ OTP → No Refund",
   NUMBER_FAILED: "❌ <b>Purchase Failed</b>\n\nWe couldn't acquire a number at this time. Please try again later.",
   NO_BALANCE: "⚠️ <b>Insufficient Balance</b>\n\nPlease add funds to your wallet to purchase this number.",
   OTP_RECEIVED: "📩 <b>OTP #{count} Received</b>\n\n🔑 <b>OTP:</b>\n<code>{otp}</code>",
