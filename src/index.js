@@ -83,7 +83,7 @@ function esc(text) {
 
 async function getSysSettings() {
   const s = await prisma.setting.findUnique({ where: { key: 'SYSTEM_SETTINGS' } });
-  return s ? JSON.parse(s.value) : {};
+  return s ? JSON.parse(s.value) : { referralBonus: 0.5 };
 }
 
 async function getSmsSettings() {
@@ -157,25 +157,25 @@ async function processReferral(newUserId, referrerPayload) {
     const newUser = await tx.user.findUnique({ where: { telegramId: newTgId } });
     if (!referrer || !newUser) return false;
 
+    // Verify Force Join before counting referral
+    if (!(await checkForceJoin(newTgId))) return false;
+
     const existing = await tx.referral.findUnique({ where: { referredId: newUser.id } });
     if (existing) return false;
 
     const setObj = await tx.setting.findUnique({ where: { key: 'SYSTEM_SETTINGS' } });
-    const sys = setObj ? JSON.parse(setObj.value) : {};
-    const bonus = sys.referralBonus || 0;
+    const sys = setObj ? JSON.parse(setObj.value) : { referralBonus: 0.5 };
+    const bonus = Number(sys.referralBonus || 0.5);
 
     await tx.referral.create({ data: { referrerId: referrer.id, referredId: newUser.id, bonus } });
-    
     await tx.user.update({
       where: { id: referrer.id },
       data: { totalReferrals: { increment: 1 }, referralEarnings: { increment: bonus }, balance: { increment: bonus } }
     });
 
-    if (bonus > 0) {
-      await tx.walletHistory.create({
-        data: { userId: referrer.id, type: 'REFERRAL_BONUS', amount: bonus, description: `Referral bonus for ${newUserId}` }
-      });
-    }
+    await tx.walletHistory.create({
+      data: { userId: referrer.id, type: 'REFERRAL_BONUS', amount: bonus, description: `Referral bonus for ${newUserId}` }
+    });
     return true;
   });
 }
@@ -253,6 +253,7 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
         if (otpsReceived >= 3) {
           await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
           await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
+          await tg.sendMessage(chatId, MSG.MAX_OTP_REACHED);
           return;
         }
       }
@@ -271,7 +272,7 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
         prisma.walletHistory.create({ data: { userId: userDbId, type: 'REFUND', amount: price, description: `Timeout refund: ${phone}` } })
       ]);
 
-      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND.replace('{amount}', price), { inline_keyboard: [] });
+      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND, { inline_keyboard: [] });
     } else {
       await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
       await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] });
@@ -497,7 +498,7 @@ async function handleUpdate(update) {
         const txs = await prisma.walletHistory.findMany({ 
           where: { 
             userId: uHist.id,
-            type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS', 'REFUND', 'ADMIN_REMOVED'] } 
+            type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS'] } 
           }, 
           take: 10, 
           orderBy: { createdAt: 'desc' } 
@@ -517,7 +518,7 @@ async function handleUpdate(update) {
         const uRef = await getUser(userId);
         const sysRef = await getSysSettings();
         const rLink = `https://t.me/${CONFIG.telegram.botUsername}?start=${userId}`;
-        const rTxt = MSG.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0)).replace('{referralLink}', esc(rLink)) + `\n\n📊 <b>Your Stats</b>\n👥 <b>Referrals:</b> <code>${uRef.totalReferrals}</code>\n💰 <b>Earnings:</b> <code>₹${esc(uRef.referralEarnings)}</code>`;
+        const rTxt = MSG.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0.5)).replace('{referralLink}', esc(rLink)) + `\n\n📊 <b>Your Stats</b>\n👥 <b>Referrals:</b> <code>${uRef.totalReferrals}</code>\n💰 <b>Earnings:</b> <code>₹${esc(uRef.referralEarnings)}</code>`;
         await tg.sendMessage(chatId, rTxt);
         break;
 
@@ -609,8 +610,7 @@ async function handleUpdate(update) {
         if (oCan.otpCount === 0) {
           await prisma.$transaction([
             prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
-            prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } }),
-            prisma.walletHistory.create({ data: { userId: uCan.id, type: 'REFUND', amount: oCan.price, description: `Manual refund: ${oCan.phoneNumber}` } })
+            prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } })
           ]);
           await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED_REFUND, { inline_keyboard: [] });
         } else {
