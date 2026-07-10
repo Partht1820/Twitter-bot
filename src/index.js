@@ -99,7 +99,7 @@ server.post('/webhook', async (request, reply) => {
         }
         // Normal Commands
         else if (text.startsWith('/start')) {
-          await handleStart(chatId, telegramUser);
+          await handleStart(chatId, telegramUser, text);
         } else if (text === '🐦 Get Twitter Number') {
           await handleBuyNumber(chatId, userId);
         } else if (text === '👤 My Account') {
