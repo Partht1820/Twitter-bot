@@ -41,13 +41,13 @@ export async function handleStart(chatId, telegramUser, text) {
   try {
     // 1. Check Maintenance Mode
     const settings = await getSystemSettings();
+    
+    const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
+    const isAdmin = String(userId) === String(adminId);
 
-const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
-const isAdmin = String(userId) === String(adminId);
-
-if (settings?.isMaintenanceMode && !isAdmin) {
-    return await sendMessage(chatId, MESSAGES.MAINTENANCE_MODE);
-}
+    if (settings?.isMaintenanceMode && !isAdmin) {
+        return await sendMessage(chatId, MESSAGES.MAINTENANCE_MODE);
+    }
 
     // 2 & 3. Fetch or Create User
     let user = await getUser(userId);
@@ -92,9 +92,7 @@ if (settings?.isMaintenanceMode && !isAdmin) {
     }
 
     // 9. Verification succeeds: Show Welcome & Main Menu
-    const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
-    const isUserAdmin = String(userId) === String(adminId);
-    const menu = isUserAdmin ? getAdminMainMenu() : getMainMenu();
+    const menu = isAdmin ? getAdminMainMenu() : getMainMenu();
 
     await sendMessage(chatId, MESSAGES.WELCOME, menu);
 
@@ -114,8 +112,12 @@ export async function handleVerifyJoin(chatId, userId, messageId) {
   try {
     // Check system states again for security
     const settings = await getSystemSettings();
-    if (settings?.isMaintenanceMode) {
-      return await sendMessage(chatId, MESSAGES.MAINTENANCE_MODE);
+    
+    const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
+    const isAdmin = String(userId) === String(adminId);
+
+    if (settings?.isMaintenanceMode && !isAdmin) {
+        return await sendMessage(chatId, MESSAGES.MAINTENANCE_MODE);
     }
 
     const banned = await isUserBanned(userId);
@@ -131,9 +133,7 @@ export async function handleVerifyJoin(chatId, userId, messageId) {
 
     if (isMember) {
       // 9. If verification succeeds: update message & show Welcome + Main Menu
-      const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
-      const isUserAdmin = String(userId) === String(adminId);
-      const menu = isUserAdmin ? getAdminMainMenu() : getMainMenu();
+      const menu = isAdmin ? getAdminMainMenu() : getMainMenu();
 
       await editMessage(chatId, messageId, MESSAGES.VERIFICATION_SUCCESSFUL);
       await sendMessage(chatId, MESSAGES.WELCOME, menu);
