@@ -131,11 +131,11 @@ export async function handlePaymentScreenshot(chatId, userId, photoFileId) {
     }
 
     // Create a pending payment request in the database
-    const payment = await createPendingPayment({
-      userId,
-      photoFileId,
-      status: 'PENDING'
-    });
+    await createPendingPayment({
+  userId: String(userId),
+  photoFileId,
+  status: 'PENDING'
+});
 
     // Notify the admin with the screenshot and approval keyboard
     const adminChatId = settings?.adminChatId;
