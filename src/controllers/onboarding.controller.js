@@ -1,9 +1,10 @@
 import { MESSAGES } from '../messages.js';
-import { getMainMenu, getForceJoinKeyboard } from '../keyboards.js';
+import { getMainMenu, getForceJoinKeyboard, getAdminMainMenu } from '../keyboards.js';
 import { sendMessage, editMessage, getChatMember } from '../telegram.js';
 import { getUser, createUser, isUserBanned } from '../services/user.service.js';
 import { processReferral } from '../services/referral.service.js';
 import { getSystemSettings } from '../services/system.service.js';
+import { CONFIG } from '../config.js';
 
 /**
  * Helper function to verify if a user is a member of required channels/groups.
@@ -87,7 +88,11 @@ export async function handleStart(chatId, telegramUser, text) {
     }
 
     // 9. Verification succeeds: Show Welcome & Main Menu
-    await sendMessage(chatId, MESSAGES.WELCOME, getMainMenu());
+    const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
+    const isUserAdmin = String(userId) === String(adminId);
+    const menu = isUserAdmin ? getAdminMainMenu() : getMainMenu();
+
+    await sendMessage(chatId, MESSAGES.WELCOME, menu);
 
   } catch (error) {
     console.error(`[START COMMAND ERROR] Chat: ${chatId} | User: ${userId} | Error:`, error);
@@ -122,8 +127,12 @@ export async function handleVerifyJoin(chatId, userId, messageId) {
 
     if (isMember) {
       // 9. If verification succeeds: update message & show Welcome + Main Menu
+      const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
+      const isUserAdmin = String(userId) === String(adminId);
+      const menu = isUserAdmin ? getAdminMainMenu() : getMainMenu();
+
       await editMessage(chatId, messageId, MESSAGES.VERIFICATION_SUCCESSFUL);
-      await sendMessage(chatId, MESSAGES.WELCOME, getMainMenu());
+      await sendMessage(chatId, MESSAGES.WELCOME, menu);
     } else {
       // If verification fails
       await sendMessage(chatId, MESSAGES.VERIFICATION_FAILED);
