@@ -19,6 +19,7 @@
     "postgresql"
   ],
   "dependencies": {
+    "@fastify/formbody": "^7.4.0",
     "@prisma/client": "^5.11.0",
     "dotenv": "^16.4.5",
     "fastify": "^4.26.2"
