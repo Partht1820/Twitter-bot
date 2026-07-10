@@ -17,6 +17,9 @@ if (process.env.NODE_ENV !== 'production') globalThis.prisma = prisma;
 const server = Fastify({ logger: true, trustProxy: true });
 server.register(formbody);
 
+// In-memory store for pending referrals awaiting Force Join verification
+const pendingReferrals = new Map();
+
 // ==========================================
 // 2. CONSTANTS: MESSAGES & KEYBOARDS
 // ==========================================
@@ -27,11 +30,11 @@ const MSG = {
   MAINTENANCE_MODE: "🛠️ <b>Maintenance Mode</b>\n\nOur service is currently undergoing scheduled maintenance.",
   INTERNAL_ERROR: "❌ <b>System Error</b>\n\nAn unexpected error occurred.",
   UNKNOWN_ERROR: "❓ <b>Unknown Error</b>\n\nSomething went wrong. Please try again later.",
-  FORCE_JOIN: "⚠️ <b>Access Restricted</b>\n\nYou must join our official channels to use this bot. Please join using the links below, then click <b>Verify</b>.",
+  FORCE_JOIN: "🚫 <b>Access Required</b>\n\nTo continue using this bot, please join our official Channel and Group.\n\nAfter joining both, tap the button below to verify your membership.",
   VERIFIED_SUCCESS: "✅ <b>Verification Successful</b>\n\nWelcome aboard! You now have full access to the bot.",
   VERIFIED_FAILED: "❌ <b>Verification Failed</b>\n\nWe couldn't verify your membership.",
   PURCHASING: "🔄 <b>Purchasing Number...</b>\n\nPlease wait while we reserve a number for you.",
-  NUMBER_SUCCESS: "✅ <b>Number Purchased Successfully</b>\n\n🌍 <b>Country:</b>\nUnited States 🇺🇸\n\n📱 <b>Service:</b>\nTwitter\n\n🆔 <b>Order ID:</b>\n<code>{orderId}</code>\n\n☎️ <b>Number:</b>\n<code>{phoneNumber}</code>\n\n💰 <b>Charged:</b>\n₹{amount}\n\n⏳ <b>Expires In:</b>\n{remainingTime}\n\n━━━━━━━━━━━━━━━━━━━━\nℹ️ Your number is now active.\n\n• Wait for your OTP(s).\n• If you no longer need this number, tap the \"Cancel Number\" button.\n\n💡 <b>Refund Policy</b>\n\n✅ 0 OTP Received → Full Refund\n\n❌ 1 or More OTPs Received → No Refund\n\n━━━━━━━━━━━━━━━━━━━━",
+  NUMBER_SUCCESS: "✅ <b>Number Ready</b>\n\n🇺🇸 <b>United States</b> • 🐦 <b>Twitter</b>\n\n📱 <code>+1 {phoneNumber}</code>\n🆔 <code>{orderId}</code>\n💳 <b>₹{amount}</b>\n\n━━━━━━━━━━━━━━━━━━\n💡 <b>Refund Policy</b>\n• 0 OTP → Full Refund\n• 1+ OTP → No Refund"
   NUMBER_FAILED: "❌ <b>Purchase Failed</b>\n\nWe couldn't acquire a number at this time. Please try again later.",
   NO_BALANCE: "⚠️ <b>Insufficient Balance</b>\n\nPlease add funds to your wallet to purchase this number.",
   OTP_RECEIVED: "📩 <b>OTP #{count} Received</b>\n\n🔑 <b>OTP:</b>\n<code>{otp}</code>",
@@ -55,7 +58,7 @@ const BTN = { inline: (t, c) => ({text: t, callback_data: c}), url: (t, u) => ({
 const KB = {
   main: { keyboard: [[{text: "🐦 Get Twitter Number"}, {text: "👤 My Account"}], [{text: "📜 Wallet History"}, {text: "💳 Add Balance"}], [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}]], resize_keyboard: true, is_persistent: true },
   adminMain: { keyboard: [[{text: "🐦 Get Twitter Number"}, {text: "👤 My Account"}], [{text: "📜 Wallet History"}, {text: "💳 Add Balance"}], [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}], [{text: "📊 Statistics"}, {text: "👥 Users"}, {text: "💳 Payments"}], [{text: "🛒 Orders"}, {text: "📢 Broadcast"}, {text: "⚙️ Settings"}]], resize_keyboard: true, is_persistent: true },
-  forceJoin: (c, g) => ({ inline_keyboard: [[BTN.url("📢 Join Channel", `https://t.me/${c.replace("@","")}`)], [BTN.url("👥 Join Group", `https://t.me/${g.replace("@","")}`)], [BTN.inline("✅ Verify", "verify_join")]] }),
+  forceJoin: (c, g) => ({ inline_keyboard: [[BTN.url("📢 Join Channel", `https://t.me/${c.replace("@","")}`)], [BTN.url("👥 Join Group", `https://t.me/${g.replace("@","")}`)], [BTN.inline("✅ I've Joined", "verify_join")]] }),
   cancel: (id) => ({ inline_keyboard: [[BTN.inline("🔴 Cancel Number", `cancel_order:${id}`)]] }),
   approveReject: (pId, uId) => ({ inline_keyboard: [[BTN.inline("✅ Approve", `approve_payment:${pId}:${uId}`), BTN.inline("❌ Reject", `reject_payment:${pId}:${uId}`)]] }),
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
@@ -105,6 +108,33 @@ async function isAdmin(tgId) {
 async function isBanned(tgId) {
   const b = await prisma.bannedUser.findUnique({ where: { telegramId: BigInt(tgId) } });
   return b !== null;
+}
+
+async function checkForceJoin(userId) {
+  if (await isAdmin(userId)) return true;
+  const sys = await getSysSettings();
+  if (!sys?.forceJoinEnabled) return true;
+  try {
+    const c = await tg.getChatMember(sys.forceJoinChannel, userId);
+    const g = await tg.getChatMember(sys.forceJoinGroup, userId);
+    const validStatuses = ['creator', 'administrator', 'member', 'restricted'];
+    return validStatuses.includes(c?.status) && validStatuses.includes(g?.status);
+  } catch (e) {
+    return false;
+  }
+}
+
+async function verifyAccess(chatId, userId) {
+  if (await isBanned(userId)) { await tg.sendMessage(chatId, MSG.BANNED); return false; }
+  const sys = await getSysSettings();
+  if (sys?.isMaintenanceMode && !(await isAdmin(userId))) { await tg.sendMessage(chatId, MSG.MAINTENANCE_MODE); return false; }
+  
+  const isJoined = await checkForceJoin(userId);
+  if (!isJoined) {
+    await tg.sendMessage(chatId, MSG.FORCE_JOIN, KB.forceJoin(sys.forceJoinChannel, sys.forceJoinGroup));
+    return false;
+  }
+  return true;
 }
 
 async function processReferral(newUserId, referrerPayload) {
@@ -225,7 +255,8 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
       
       await prisma.$transaction([
         prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }),
-        prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } })
+        prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } }),
+        prisma.walletHistory.create({ data: { userId: userDbId, type: 'REFUND', amount: price, description: `Timeout refund: ${phone}` } })
       ]);
 
       await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND.replace('{amount}', price), { inline_keyboard: [] });
@@ -234,26 +265,6 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
       await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] });
     }
   } catch (error) { console.error(`[POLLING ERR] Order: ${orderId}`, error); }
-}
-
-async function verifyAccess(chatId, userId) {
-  if (await isBanned(userId)) { await tg.sendMessage(chatId, MSG.BANNED); return false; }
-  const sys = await getSysSettings();
-  if (sys?.isMaintenanceMode && !(await isAdmin(userId))) { await tg.sendMessage(chatId, MSG.MAINTENANCE_MODE); return false; }
-  if (sys?.forceJoinEnabled && !(await isAdmin(userId))) {
-    try {
-      const c = await tg.getChatMember(sys.forceJoinChannel, userId);
-      const g = await tg.getChatMember(sys.forceJoinGroup, userId);
-      if (['left', 'kicked'].includes(c.status) || ['left', 'kicked'].includes(g.status)) {
-        await tg.sendMessage(chatId, MSG.FORCE_JOIN, KB.forceJoin(sys.forceJoinChannel, sys.forceJoinGroup));
-        return false;
-      }
-    } catch (e) { 
-      await tg.sendMessage(chatId, MSG.FORCE_JOIN, KB.forceJoin(sys.forceJoinChannel, sys.forceJoinGroup));
-      return false; 
-    }
-  }
-  return true;
 }
 
 // ==========================================
@@ -395,9 +406,17 @@ async function handleUpdate(update) {
 
     if (txt.startsWith('/start')) {
       const payload = txt.split(' ')[1];
-      if (payload) await processReferral(userId, payload);
-      const u = await getUser(userId);
+      if (payload) pendingReferrals.set(userId, payload);
+      
+      await getUser(userId); // Ensure user object is created
+
       if (!(await verifyAccess(chatId, userId))) return;
+
+      if (pendingReferrals.has(userId)) {
+        await processReferral(userId, pendingReferrals.get(userId));
+        pendingReferrals.delete(userId);
+      }
+
       return await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
     }
 
@@ -440,15 +459,19 @@ async function handleUpdate(update) {
             });
           });
 
-          const m = Math.floor(smsSet.timeout / 60);
-          const s = smsSet.timeout % 60;
-          const remainingTime = `${m}m ${s}s`;
+          let formattedPhone = pr.phoneNumber;
+          if (!formattedPhone.startsWith('+')) {
+            if (formattedPhone.startsWith('1')) {
+              formattedPhone = '+' + formattedPhone;
+            } else {
+              formattedPhone = '+1 ' + formattedPhone;
+            }
+          }
 
           const successMsg = MSG.NUMBER_SUCCESS
             .replace('{orderId}', ord.id)
-            .replace('{phoneNumber}', pr.phoneNumber)
-            .replace('{amount}', smsSet.maxPrice)
-            .replace('{remainingTime}', remainingTime);
+            .replace('{phoneNumber}', formattedPhone)
+            .replace('{amount}', smsSet.maxPrice);
 
           await tg.editMessage(chatId, loadMsg?.message_id, successMsg, KB.cancel(pr.activationId));
           startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg?.message_id, smsSet.timeout, smsSet.interval);
@@ -552,9 +575,16 @@ async function handleUpdate(update) {
 
     switch (action) {
       case 'verify_join':
-        if (await verifyAccess(chatId, userId)) {
-          await tg.editMessage(chatId, msgId, MSG.VERIFIED_SUCCESS);
+        const isJoined = await checkForceJoin(userId);
+        if (isJoined || admin) {
+          await tg.deleteMessage(chatId, msgId);
+          if (pendingReferrals.has(userId)) {
+            await processReferral(userId, pendingReferrals.get(userId));
+            pendingReferrals.delete(userId);
+          }
           await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
+        } else {
+          await tg.answerCallbackQuery(cb.id, { text: "❌ Please join BOTH the Channel and the Group to continue.", show_alert: true });
         }
         break;
 
@@ -568,7 +598,8 @@ async function handleUpdate(update) {
         if (oCan.otpCount === 0) {
           await prisma.$transaction([
             prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
-            prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } })
+            prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } }),
+            prisma.walletHistory.create({ data: { userId: uCan.id, type: 'REFUND', amount: oCan.price, description: `Manual refund: ${oCan.phoneNumber}` } })
           ]);
           await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED_REFUND, { inline_keyboard: [] });
         } else {
