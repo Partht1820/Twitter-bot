@@ -1,149 +1,254 @@
-import { MESSAGES } from '../messages.js';
-import { getMaintenanceMode, getAdminSmsSettings } from '../keyboards.js';
-import { sendMessage, editMessage } from '../telegram.js';
-import { getSystemSettings, updateSystemSettings, getSmsSettings } from '../services/system.service.js';
-import { CONFIG } from '../config.js';
+import Fastify from 'fastify';
+import formbody from '@fastify/formbody';
+import { CONFIG } from './config.js';
+import { connectDatabase } from './database.js';
+import { setWebhook, answerCallbackQuery, sendMessage } from './telegram.js';
 
-/**
- * Escapes text specifically for inside MarkdownV2 code blocks (`text`).
- * @param {string|number} text - The text to escape.
- * @returns {string} - The escaped text.
- */
-function escapeForCodeBlock(text) {
-  if (text === null || text === undefined) return 'None';
-  return text.toString().replace(/([`\\])/g, '\\$1');
-}
+// Import Controllers
+import { handleStart, handleVerifyJoin } from './controllers/onboarding.controller.js';
+import { handleBuyNumber, handleCancelOrder } from './controllers/order.controller.js';
+import { handleMyAccount } from './controllers/account.controller.js';
+import { handleAddBalance, handleWalletHistory, handlePaymentScreenshot } from './controllers/wallet.controller.js';
+import { handleReferral } from './controllers/referral.controller.js';
+import { handleSupport } from './controllers/support.controller.js';
+import { handleApprovePayment, handleRejectPayment, handlePaymentAmountReply } from './controllers/payment.controller.js';
+import { 
+  handleAdminMaintenance, 
+  handleAdminSmsSettings, 
+  handleAdminSmsCurrent, 
+  handleAdminSmsEdit,
+  handleAdminStatistics,
+  handleAdminUsers,
+  handleAdminPayments,
+  handleAdminOrders,
+  handleAdminBroadcast,
+  handleAdminSettings
+} from './controllers/admin.controller.js';
 
-/**
- * Verifies if the user attempting the action is the configured admin.
- * @param {number} userId - The user ID to verify.
- * @returns {Promise<boolean>} - True if admin, false otherwise.
- */
-async function isAdmin(userId) {
-  const settings = await getSystemSettings();
-  const adminId = settings?.adminChatId || CONFIG?.adminId;
-  return String(userId) === String(adminId);
-}
+const server = Fastify({
+  logger: true,
+  trustProxy: true
+});
 
-/**
- * Handles the toggling of System Maintenance Mode.
- * @param {number} chatId - The admin's chat ID.
- * @param {number} adminId - The user ID of the admin pressing the button.
- * @param {number} messageId - The message ID containing the inline keyboard.
- */
-export async function handleAdminMaintenance(chatId, adminId, messageId) {
-  try {
-    if (!(await isAdmin(adminId))) {
-      return await sendMessage(chatId, "⛔ *Access Denied:* You are not authorized.");
-    }
+// In-memory store for mapping admin replies to original payment contexts
+const pendingPaymentApprovals = new Map();
 
-    const settings = await getSystemSettings();
-    const newState = !settings?.isMaintenanceMode;
+// Register Plugins
+server.register(formbody);
 
-    // Update the database
-    await updateSystemSettings({ isMaintenanceMode: newState });
+// Global Error Handler
+server.setErrorHandler((error, request, reply) => {
+  server.log.error(error);
+  reply.status(error.statusCode || 500).send({
+    success: false,
+    message: error.message || 'Internal Server Error'
+  });
+});
 
-    // Update the UI
-    const statusText = newState ? '🟢 ON' : '🔴 OFF';
-    const text = `⚙️ *System Settings*\n\n🛠️ *Maintenance Mode:* ${statusText}`;
+// Not Found Handler
+server.setNotFoundHandler((request, reply) => {
+  reply.status(404).send({
+    success: false,
+    message: 'Route not found.'
+  });
+});
 
-    return await editMessage(chatId, messageId, text, getMaintenanceMode(newState));
-  } catch (error) {
-    console.error(`[ADMIN MAINTENANCE ERROR] Chat: ${chatId} | Admin: ${adminId}`, error);
-    return await sendMessage(chatId, MESSAGES.INTERNAL_ERROR);
+// Root Endpoint
+server.get('/', async (request, reply) => {
+  return {
+    success: true,
+    message: 'Telegram OTP Bot is running.'
+  };
+});
+
+// Health Check Endpoint
+server.get('/health', async (request, reply) => {
+  return {
+    status: 'ok',
+    uptime: process.uptime()
+  };
+});
+
+// Telegram Webhook Endpoint
+server.post('/webhook', async (request, reply) => {
+  // 1. Verify Telegram Secret Token
+  const secretToken = request.headers['x-telegram-bot-api-secret-token'];
+  if (secretToken !== CONFIG.webhook.secret) {
+    server.log.warn('[WEBHOOK] Unauthorized request attempt');
+    return reply.status(401).send({ error: 'Unauthorized' });
   }
-}
 
-/**
- * Handles the display of the SMS Provider Settings menu.
- * @param {number} chatId - The admin's chat ID.
- * @param {number} adminId - The user ID of the admin.
- * @param {number} messageId - The message ID to edit.
- */
-export async function handleAdminSmsSettings(chatId, adminId, messageId) {
+  // 2. Acknowledge Receipt Immediately to Prevent Telegram Retries
+  reply.status(200).send({ ok: true });
+
+  const update = request.body;
+
   try {
-    if (!(await isAdmin(adminId))) {
-      return await sendMessage(chatId, "⛔ *Access Denied:* You are not authorized.");
-    }
+    if (update.message) {
+      const message = update.message;
+      const chatId = message.chat.id;
+      const telegramUser = message.from;
+      const userId = telegramUser.id;
 
-    return await editMessage(
-      chatId, 
-      messageId, 
-      MESSAGES.SMS_PROVIDER_SETTINGS, 
-      getAdminSmsSettings()
-    );
+      // Handle Text Messages
+      if (message.text) {
+        const text = message.text;
+
+        // Detect ForceReply for Payment Approval
+        if (message.reply_to_message && message.reply_to_message.text && message.reply_to_message.text.includes('Enter deposit amount for this payment')) {
+          const pendingApproval = pendingPaymentApprovals.get(userId);
+          
+          if (pendingApproval) {
+            const { paymentId, paymentUserId } = pendingApproval;
+            await handlePaymentAmountReply(chatId, userId, text, paymentId, paymentUserId);
+            
+            // Cleanup context after processing
+            pendingPaymentApprovals.delete(userId);
+          } else {
+            await sendMessage(chatId, '❌ Context lost or payment already processed. Please approve the payment again from the original message.');
+          }
+        }
+        // Normal Commands
+        else if (text.startsWith('/start')) {
+          await handleStart(chatId, telegramUser, text);
+        } else if (text === '🐦 Get Twitter Number') {
+          await handleBuyNumber(chatId, userId);
+        } else if (text === '👤 My Account') {
+          await handleMyAccount(chatId, userId);
+        } else if (text === '💳 Add Balance') {
+          await handleAddBalance(chatId, userId);
+        } else if (text === '📜 Wallet History') {
+          await handleWalletHistory(chatId, userId);
+        } else if (text === '🎁 Refer & Earn') {
+          await handleReferral(chatId, userId);
+        } else if (text === '📞 Support') {
+          await handleSupport(chatId, userId);
+        } 
+        // Admin Menu Commands
+        else if (text === '📊 Statistics') {
+          await handleAdminStatistics(chatId, userId);
+        } else if (text === '👥 Users') {
+          await handleAdminUsers(chatId, userId);
+        } else if (text === '💳 Payments') {
+          await handleAdminPayments(chatId, userId);
+        } else if (text === '🛒 Orders') {
+          await handleAdminOrders(chatId, userId);
+        } else if (text === '📢 Broadcast') {
+          await handleAdminBroadcast(chatId, userId);
+        } else if (text === '⚙️ Settings') {
+          await handleAdminSettings(chatId, userId);
+        } else {
+          await sendMessage(chatId, '❌ Unknown command.');
+        }
+      } 
+      // Handle Payment Screenshots
+      else if (message.photo && message.photo.length > 0) {
+        // Retrieve the highest resolution photo (last in the array)
+        const highestResPhoto = message.photo[message.photo.length - 1];
+        await handlePaymentScreenshot(chatId, userId, highestResPhoto.file_id);
+      }
+    } 
+    
+    // Handle Inline Keyboard Callbacks
+    else if (update.callback_query) {
+      const callbackQuery = update.callback_query;
+      const data = callbackQuery.data;
+      const message = callbackQuery.message;
+      const chatId = message.chat.id;
+      const userId = callbackQuery.from.id; // Represents the user or admin clicking the button
+      const messageId = message.message_id;
+
+      // Immediately answer the callback query to remove the loading state on the user's client
+      await answerCallbackQuery(callbackQuery.id).catch(err => server.log.error('[WEBHOOK] Failed to answer callback query', err));
+
+      if (data === 'verify_join') {
+        await handleVerifyJoin(chatId, userId, messageId);
+      } else if (data.startsWith('cancel_order:')) {
+        const activationId = data.replace('cancel_order:', '');
+        await handleCancelOrder(chatId, userId, activationId, messageId);
+      } else if (data.startsWith('approve_payment:')) {
+        const match = data.match(/^approve_payment:(.+):(\d+)$/);
+        if (match) {
+          const paymentId = match[1];
+          const paymentUserId = match[2];
+          
+          // Store payment context for the admin's impending ForceReply
+          pendingPaymentApprovals.set(userId, { paymentId, paymentUserId });
+          
+          try {
+            await handleApprovePayment(chatId, userId, paymentId, paymentUserId, messageId);
+          } catch (error) {
+            // Remove pending context if the controller throws an error
+            pendingPaymentApprovals.delete(userId);
+            throw error;
+          }
+        }
+      } else if (data.startsWith('reject_payment:')) {
+        const match = data.match(/^reject_payment:(.+):(\d+)$/);
+        if (match) {
+          const paymentId = match[1];
+          const paymentUserId = match[2];
+          
+          // Cleanup any lingering context if admin rejects instead
+          pendingPaymentApprovals.delete(userId);
+          
+          await handleRejectPayment(chatId, userId, paymentId, paymentUserId, messageId);
+        }
+      } else if (data === 'admin_maintenance') {
+        await handleAdminMaintenance(chatId, userId, messageId);
+      } else if (data === 'admin_sms_settings') {
+        await handleAdminSmsSettings(chatId, userId, messageId);
+      } else if (data === 'admin_sms_current') {
+        await handleAdminSmsCurrent(chatId, userId, messageId);
+      } else if (data.startsWith('admin_sms_edit:')) {
+        const field = data.replace('admin_sms_edit:', '');
+        await handleAdminSmsEdit(chatId, userId, field, messageId);
+      }
+    }
   } catch (error) {
-    console.error(`[ADMIN SMS SETTINGS ERROR] Chat: ${chatId} | Admin: ${adminId}`, error);
-    return await sendMessage(chatId, MESSAGES.INTERNAL_ERROR);
+    server.log.error(error, '[WEBHOOK] Error processing update');
   }
-}
+});
 
 /**
- * Handles the display of the Current SMS Provider Configuration.
- * @param {number} chatId - The admin's chat ID.
- * @param {number} adminId - The user ID of the admin.
- * @param {number} messageId - The message ID to edit.
+ * Initializes and starts the Fastify server.
  */
-export async function handleAdminSmsCurrent(chatId, adminId, messageId) {
+const start = async () => {
   try {
-    if (!(await isAdmin(adminId))) {
-      return await sendMessage(chatId, "⛔ *Access Denied:* You are not authorized.");
-    }
+    // 1. Ensure database connection is established
+    await connectDatabase();
 
-    const smsSettings = await getSmsSettings();
-
-    const currentConfigText = MESSAGES.CURRENT_CONFIGURATION
-      .replace('{country}', escapeForCodeBlock(smsSettings?.countryId))
-      .replace('{operator}', escapeForCodeBlock(smsSettings?.operatorId))
-      .replace('{service}', escapeForCodeBlock(smsSettings?.serviceId))
-      .replace('{amount}', escapeForCodeBlock(smsSettings?.maxPrice))
-      .replace('{timeout}', escapeForCodeBlock(smsSettings?.timeout))
-      .replace('{interval}', escapeForCodeBlock(smsSettings?.interval));
-
-    // Display the current config but keep the settings keyboard visible for easy navigation
-    return await editMessage(chatId, messageId, currentConfigText, getAdminSmsSettings());
-  } catch (error) {
-    console.error(`[ADMIN SMS CURRENT ERROR] Chat: ${chatId} | Admin: ${adminId}`, error);
-    return await sendMessage(chatId, MESSAGES.INTERNAL_ERROR);
-  }
-}
-
-/**
- * Handles the initiation of editing a specific SMS setting by prompting the admin.
- * @param {number} chatId - The admin's chat ID.
- * @param {number} adminId - The user ID of the admin.
- * @param {string} field - The specific setting field being edited (e.g., 'country', 'price').
- * @param {number} messageId - The message ID where the callback originated.
- */
-export async function handleAdminSmsEdit(chatId, adminId, field, messageId) {
-  try {
-    if (!(await isAdmin(adminId))) {
-      return await sendMessage(chatId, "⛔ *Access Denied:* You are not authorized.");
-    }
-
-    const fieldMap = {
-      'country': 'Country ID',
-      'operator': 'Operator ID',
-      'service': 'Service ID',
-      'price': 'Maximum Price',
-      'timeout': 'OTP Timeout (sec)',
-      'interval': 'Check Interval (sec)'
-    };
-
-    const fieldName = fieldMap[field];
-    if (!fieldName) {
-      return await sendMessage(chatId, MESSAGES.UNKNOWN_ERROR);
-    }
-
-    const promptText = `✏️ *Edit SMS Configuration*\n\nPlease reply to this message with the new value for *${fieldName}*\\.`;
-
-    // Send a Force Reply message to collect the admin's input
-    return await sendMessage(chatId, promptText, {
-      force_reply: true,
-      selective: true
+    // 2. Start Fastify Server
+    await server.listen({
+      port: CONFIG.server.port,
+      host: CONFIG.server.host
     });
+    server.log.info(`[SERVER] 🚀 Server started successfully on http://${CONFIG.server.host}:${CONFIG.server.port}`);
+
+    // 3. Set Telegram Webhook
+    if (CONFIG.webhook.url && CONFIG.webhook.secret) {
+      await setWebhook(CONFIG.webhook.url, CONFIG.webhook.secret);
+      server.log.info(`[TELEGRAM] ✅ Webhook successfully set to ${CONFIG.webhook.url}`);
+    } else {
+      server.log.warn(`[TELEGRAM] ⚠️ Webhook URL or Secret missing from configuration.`);
+    }
+
   } catch (error) {
-    console.error(`[ADMIN SMS EDIT ERROR] Chat: ${chatId} | Admin: ${adminId} | Field: ${field}`, error);
-    return await sendMessage(chatId, MESSAGES.INTERNAL_ERROR);
+    server.log.error(error, '[SERVER] ❌ Failed to start the server');
+    process.exit(1);
   }
-}
+};
+
+// Graceful Shutdown Handler for the HTTP server
+const closeGracefully = async (signal) => {
+  server.log.info(`\n[SERVER] Received ${signal}. Shutting down HTTP server gracefully...`);
+  await server.close();
+  process.exit(0);
+};
+
+process.on('SIGINT', () => closeGracefully('SIGINT'));
+process.on('SIGTERM', () => closeGracefully('SIGTERM'));
+
+start();
+
+export default server;
