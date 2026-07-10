@@ -40,7 +40,8 @@ const MSG = {
   OTP_TIMEOUT_REFUND: "⏱ *Timeout Reached*\n\nNo OTP was received in time\\. `₹{amount}` has been refunded to your wallet\\.",
   OTP_TIMEOUT_NO_REFUND: "⏱ *Timeout Reached*\n\nSession ended\\. No refund issued as OTPs were received\\.",
   ORDER_CANCELLED: "🛑 *Number Cancelled*\n\nThe number was cancelled and your funds have been refunded\\.",
-  PAYMENT_INSTRUCT: "💳 *Add Balance*\n\nPlease send your payment to the UPI ID below and upload a screenshot here\\.\n\n🏦 *UPI ID:* `{upi}`\n\n_Note: Send the screenshot directly in this chat\\._",
+  PAYMENT_INSTRUCT: "━━━━━━━━━━━━━━━━━━━━\n💳 UPI ID:\n`{upi}`\n\n📷 After completing the payment, send the payment screenshot\\.\n\n📝 In the photo caption, write ONLY the payment amount\\.\n\nExample:\n100\n\n❌ Don't write:\nAmount: 100\nPaid 100\n100 INR\nPayment done\n\n✅ Write only:\n100\n━━━━━━━━━━━━━━━━━━━━",
+  PAYMENT_CAPTION_ERROR: "❌ Please send the payment screenshot with only the amount in the caption\\. Example: 100",
   PAYMENT_SUBMITTED: "📤 *Payment Submitted*\n\nYour screenshot has been sent to the admin for review\\. Please wait for approval\\.",
   PAYMENT_APPROVED: "✅ *Payment Approved*\n\n`₹{amount}` has been successfully added to your wallet\\.",
   PAYMENT_REJECTED: "❌ *Payment Rejected*\n\nYour recent payment submission was declined\\. Contact support if you need help\\.",
@@ -270,13 +271,12 @@ async function handleUpdate(update) {
     if (msg.photo?.length > 0) {
       if (!(await verifyAccess(chatId, userId))) return;
 
-      // Extract and validate amount from caption
       const amountStr = msg.caption ? msg.caption.trim() : '';
       const amount = Number(amountStr);
 
       if (!amountStr || isNaN(amount) || amount <= 0) {
         server.log.error(`[PAYMENT ERROR] Missing or invalid amount in photo caption for user ${userId}`);
-        await tg.sendMessage(chatId, '❌ Please re-upload your screenshot and include the deposit amount in the photo caption (e.g., 500).');
+        await tg.sendMessage(chatId, MSG.PAYMENT_CAPTION_ERROR);
         return;
       }
 
@@ -295,7 +295,7 @@ async function handleUpdate(update) {
       const sys = await getSysSettings();
       const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
       if (aId) {
-        const caption = `💳 *New Payment Request*\n\n🆔 *User ID:* \`${userId}\`\n🧾 *Payment ID:* \`${p.id}\``;
+        const caption = `💳 *New Payment Request*\n\n🆔 *User ID:* \`${userId}\`\n🧾 *Payment ID:* \`${p.id}\`\n💰 *Amount:* \`₹${amount}\``;
         await tg.sendPhoto(aId, photoId, { caption, reply_markup: KB.approveReject(p.id, userId) });
       }
       return await tg.sendMessage(chatId, MSG.PAYMENT_SUBMITTED);
@@ -308,37 +308,7 @@ async function handleUpdate(update) {
     if (admin && msg.reply_to_message?.text) {
       const promptText = msg.reply_to_message.text;
 
-      // 1. Payment Approval
-      if (promptText.includes('Enter deposit amount for payment ID:')) {
-        const pIdMatch = promptText.match(/payment ID:\s*(\S+)/);
-        const uIdMatch = promptText.match(/User ID:\s*(\d+)/);
-        if (!pIdMatch || !uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse payment context.');
-        
-        const pId = pIdMatch[1];
-        const targetUId = uIdMatch[1];
-        
-        const amt = Number(txt);
-        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
-        
-        const p = await prisma.payment.findUnique({ where: { id: pId } });
-        if (!p || p.status !== 'PENDING') return await tg.sendMessage(chatId, '⚠️ Payment not pending or already processed.');
-
-        const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
-        if (!uTarget) return await tg.sendMessage(chatId, '❌ Target user not found.');
-
-        // DB Consistency: Atomic payment resolution and wallet update
-        await prisma.$transaction([
-          prisma.payment.update({ where: { id: p.id }, data: { status: 'APPROVED', amount: amt } }),
-          prisma.user.update({ where: { id: uTarget.id }, data: { balance: { increment: amt } } }),
-          prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'DEPOSIT', amount: amt, description: `Payment approved: ${p.id}` } })
-        ]);
-        
-        await tg.sendMessage(chatId, `✅ Payment \`${p.id}\` processed. Added \`₹${amt}\` to User \`${targetUId}\`.`);
-        await tg.sendMessage(targetUId, MSG.PAYMENT_APPROVED.replace('{amount}', esc(amt)));
-        return;
-      }
-
-      // 2. Broadcast Message
+      // 1. Broadcast Message
       if (promptText.includes('Enter broadcast message:')) {
         const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
         let sent = 0;
@@ -352,7 +322,7 @@ async function handleUpdate(update) {
         return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`);
       }
 
-      // 3. User Lookup
+      // 2. User Lookup
       if (promptText.includes('Enter Telegram User ID to manage:')) {
         if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
         const targetTgId = BigInt(txt);
@@ -364,7 +334,7 @@ async function handleUpdate(update) {
         return await tg.sendMessage(chatId, info, KB.manageUser(txt, isBan));
       }
 
-      // 4. Add Balance
+      // 3. Add Balance
       if (promptText.includes('Enter amount to add to user:')) {
         const uIdMatch = promptText.match(/user:\s*(\d+)/);
         if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
@@ -385,7 +355,7 @@ async function handleUpdate(update) {
         return;
       }
 
-      // 5. Deduct Balance
+      // 4. Deduct Balance
       if (promptText.includes('Enter amount to deduct from user:')) {
         const uIdMatch = promptText.match(/user:\s*(\d+)/);
         if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
@@ -405,7 +375,7 @@ async function handleUpdate(update) {
         return;
       }
 
-      // 6. SMS Settings Edit
+      // 5. SMS Settings Edit
       if (promptText.includes('Enter new value for SMS setting:')) {
         const fieldMatch = promptText.match(/setting:\s*(\w+)/);
         if (!fieldMatch) return await tg.sendMessage(chatId, '❌ Failed to parse setting field.');
@@ -496,7 +466,7 @@ async function handleUpdate(update) {
 
       case '💳 Add Balance':
         const sUpi = await getSysSettings();
-        await tg.sendMessage(chatId, MSG.PAYMENT_INSTRUCT.replace('{upi}', esc(sUpi?.upiId || 'skywardstudio@ybl')));
+        await tg.sendMessage(chatId, MSG.PAYMENT_INSTRUCT.replace('{upi}', esc(sUpi?.upiId || 'Skywardstudio@ybl')));
         break;
 
       case '🎁 Refer & Earn':
@@ -533,7 +503,7 @@ async function handleUpdate(update) {
         const pends = await prisma.payment.findMany({ where: { status: 'PENDING' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
         if (!pends.length) return await tg.sendMessage(chatId, '💳 No pending payments.');
         let pTxt = `💳 *Recent Pending Payments*\n\n`;
-        pends.forEach(p => pTxt += `🧾 *ID:* \`${p.id}\`\n👤 *User:* \`${p.user.telegramId}\`\n📅 *Date:* \`${new Date(p.createdAt).toLocaleDateString('en-IN')}\`\n\n`);
+        pends.forEach(p => pTxt += `🧾 *ID:* \`${p.id}\`\n👤 *User:* \`${p.user.telegramId}\`\n📅 *Date:* \`${new Date(p.createdAt).toLocaleDateString('en-IN')}\`\n💰 *Amount:* \`₹${esc(p.amount)}\`\n\n`);
         await tg.sendMessage(chatId, pTxt);
         break;
 
@@ -601,8 +571,33 @@ async function handleUpdate(update) {
       // Admin Actions
       case 'approve_payment':
         if (!admin) return;
+        const pId = args[0];
+        const targetTgId = BigInt(args[1]);
+
+        const payment = await prisma.payment.findUnique({ where: { id: pId } });
+        if (!payment || payment.status !== 'PENDING') {
+          await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
+          await tg.sendMessage(chatId, '⚠️ Payment not pending or already processed.');
+          return;
+        }
+
+        const uTargetApprove = await prisma.user.findUnique({ where: { telegramId: targetTgId } });
+        if (!uTargetApprove) {
+          await tg.sendMessage(chatId, '❌ Target user not found.');
+          return;
+        }
+
+        const amt = Number(payment.amount);
+
+        await prisma.$transaction([
+          prisma.payment.update({ where: { id: payment.id }, data: { status: 'APPROVED' } }),
+          prisma.user.update({ where: { id: uTargetApprove.id }, data: { balance: { increment: amt } } }),
+          prisma.walletHistory.create({ data: { userId: uTargetApprove.id, type: 'DEPOSIT', amount: amt, description: `Payment approved: ${payment.id}` } })
+        ]);
+
         await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
-        await tg.sendMessage(chatId, `💰 Enter deposit amount for payment ID: ${args[0]}\nUser ID: ${args[1]}`, { reply_markup: { force_reply: true, selective: true } });
+        await tg.sendMessage(chatId, `✅ Payment \`${pId}\` processed. Added \`₹${amt}\` to User \`${args[1]}\`.`);
+        await tg.sendMessage(targetTgId.toString(), MSG.PAYMENT_APPROVED.replace('{amount}', esc(amt)));
         break;
 
       case 'reject_payment':
@@ -645,13 +640,13 @@ async function handleUpdate(update) {
 
       case 'toggle_ban':
         if (!admin) return;
-        const targetTgId = BigInt(args[0]);
-        const isBan = await isBanned(targetTgId);
+        const targetBannedId = BigInt(args[0]);
+        const isBan = await isBanned(targetBannedId);
         if (isBan) {
-          await prisma.bannedUser.delete({ where: { telegramId: targetTgId } });
+          await prisma.bannedUser.delete({ where: { telegramId: targetBannedId } });
           await tg.sendMessage(chatId, `✅ User \`${args[0]}\` unbanned.`);
         } else {
-          await prisma.bannedUser.create({ data: { telegramId: targetTgId } });
+          await prisma.bannedUser.create({ data: { telegramId: targetBannedId } });
           await tg.sendMessage(chatId, `⛔ User \`${args[0]}\` banned.`);
         }
         await tg.editMessageReplyMarkup(chatId, msgId, KB.manageUser(args[0], !isBan));
@@ -685,8 +680,58 @@ server.post('/webhook', async (req, reply) => {
 });
 
 // ==========================================
-// 7. SERVER STARTUP & SHUTDOWN
+// 7. GLOBAL ERROR HANDLERS
 // ==========================================
+
+process.on('uncaughtException', (err) => {
+  console.error('[CRITICAL] Uncaught Exception:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[CRITICAL] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// ==========================================
+// 8. SERVER STARTUP & SHUTDOWN
+// ==========================================
+
+async function setupWebhookWithRetry(baseUrl, secret, maxRetries = 5) {
+  const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  const finalWebhookUrl = `${cleanBaseUrl}/webhook`;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      server.log.info(`[TELEGRAM] Webhook Setup Attempt ${attempt}/${maxRetries}...`);
+
+      const info = await tg.apiRequest('getWebhookInfo');
+      if (info && info.ok && info.result.url === finalWebhookUrl) {
+        server.log.info(`[TELEGRAM] ✅ Webhook is already correctly configured at ${finalWebhookUrl}`);
+        return true;
+      }
+
+      server.log.info(`[TELEGRAM] Deleting old webhook configuration...`);
+      await tg.deleteWebhook({ drop_pending_updates: false });
+
+      server.log.info(`[TELEGRAM] Registering new webhook: ${finalWebhookUrl}`);
+      await tg.setWebhook(finalWebhookUrl, secret);
+
+      const verifyInfo = await tg.apiRequest('getWebhookInfo');
+      if (verifyInfo && verifyInfo.ok && verifyInfo.result.url === finalWebhookUrl) {
+        server.log.info(`[TELEGRAM] ✅ Webhook successfully verified!`);
+        return true;
+      } else {
+        throw new Error('Verification failed. Telegram returned a different URL.');
+      }
+    } catch (error) {
+      server.log.error(`[TELEGRAM] ⚠️ Webhook setup error on attempt ${attempt}: ${error.message}`);
+      if (attempt === maxRetries) {
+        server.log.error(`[TELEGRAM] ❌ Failed to configure webhook after ${maxRetries} attempts.`);
+        return false;
+      }
+      await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+    }
+  }
+}
 
 const start = async () => {
   try {
@@ -696,8 +741,9 @@ const start = async () => {
     server.log.info(`[SERVER] 🚀 Running on http://${host}:${CONFIG.server.port}`);
 
     if (CONFIG.webhook.url && CONFIG.webhook.secret) {
-      await tg.setWebhook(CONFIG.webhook.url, CONFIG.webhook.secret);
-      server.log.info(`[TELEGRAM] ✅ Webhook set to ${CONFIG.webhook.url}`);
+      await setupWebhookWithRetry(CONFIG.webhook.url, CONFIG.webhook.secret);
+    } else {
+      server.log.warn(`[TELEGRAM] ⚠️ Webhook URL or Secret missing from configuration.`);
     }
   } catch (error) {
     server.log.error(error);
