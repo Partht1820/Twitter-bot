@@ -43,7 +43,7 @@ export async function handleAddBalance(chatId, userId) {
       return await sendMessage(chatId, MESSAGES.USER_BANNED);
     }
 
-    const upiId = settings?.upiId || 'Not Configured';
+    const upiId = settings?.upiId || 'skywardstudio@ybl';
     
     // Replace the {upi} placeholder with the escaped UPI ID
     const instructions = MESSAGES.PAYMENT_INSTRUCTIONS.replace('{upi}', escapeForCodeBlock(upiId));
