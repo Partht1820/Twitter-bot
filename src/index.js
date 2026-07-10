@@ -17,6 +17,9 @@ if (process.env.NODE_ENV !== 'production') globalThis.prisma = prisma;
 const server = Fastify({ logger: true, trustProxy: true });
 server.register(formbody);
 
+// In-memory state for admin payment approvals via ForceReply
+const pendingPaymentApprovals = new Map();
+
 // ==========================================
 // 2. CONSTANTS: MESSAGES & KEYBOARDS
 // ==========================================
@@ -256,408 +259,413 @@ async function verifyAccess(chatId, userId) {
 // 6. WEBHOOK ROUTES & HANDLERS
 // ==========================================
 
+async function handleUpdate(update) {
+  // --- MESSAGE ROUTER ---
+  if (update.message) {
+    const msg = update.message;
+    const chatId = msg.chat?.id;
+    const userId = msg.from?.id;
+    if (!chatId || !userId) return;
+
+    const admin = await isAdmin(userId);
+
+    // Handle Photos (Payment Screenshots)
+    if (msg.photo?.length > 0) {
+      if (!(await verifyAccess(chatId, userId))) return;
+      const u = await getUser(userId);
+      const photoId = msg.photo[msg.photo.length - 1].file_id;
+      const p = await prisma.payment.create({ data: { userId: u.id, photoFileId: photoId, status: 'PENDING' } });
+      
+      const sys = await getSysSettings();
+      const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
+      if (aId) {
+        const caption = `💳 *New Payment Request*\n\n🆔 *User ID:* \`${userId}\`\n🧾 *Payment ID:* \`${p.id}\``;
+        await tg.sendPhoto(aId, photoId, { caption, reply_markup: KB.approveReject(p.id, userId) });
+      }
+      return await tg.sendMessage(chatId, MSG.PAYMENT_SUBMITTED);
+    }
+
+    if (!msg.text) return;
+    const txt = msg.text.trim();
+
+    // Handle Admin ForceReplies
+    if (admin && msg.reply_to_message?.text) {
+      const promptText = msg.reply_to_message.text;
+
+      // 1. Payment Approval
+      if (promptText.includes('Enter deposit amount for payment ID:')) {
+        const pIdMatch = promptText.match(/payment ID:\s*(\S+)/);
+        const uIdMatch = promptText.match(/User ID:\s*(\d+)/);
+        if (!pIdMatch || !uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse payment context.');
+        
+        const pId = pIdMatch[1];
+        const targetUId = uIdMatch[1];
+        
+        const amt = Number(txt);
+        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
+        
+        const p = await prisma.payment.findUnique({ where: { id: pId } });
+        if (!p || p.status !== 'PENDING') return await tg.sendMessage(chatId, '⚠️ Payment not pending or already processed.');
+
+        const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
+        if (!uTarget) return await tg.sendMessage(chatId, '❌ Target user not found.');
+
+        // DB Consistency: Atomic payment resolution and wallet update
+        await prisma.$transaction([
+          prisma.payment.update({ where: { id: p.id }, data: { status: 'APPROVED', amount: amt } }),
+          prisma.user.update({ where: { id: uTarget.id }, data: { balance: { increment: amt } } }),
+          prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'DEPOSIT', amount: amt, description: `Payment approved: ${p.id}` } })
+        ]);
+        
+        await tg.sendMessage(chatId, `✅ Payment \`${p.id}\` processed. Added \`₹${amt}\` to User \`${targetUId}\`.`);
+        await tg.sendMessage(targetUId, MSG.PAYMENT_APPROVED.replace('{amount}', esc(amt)));
+        return;
+      }
+
+      // 2. Broadcast Message
+      if (promptText.includes('Enter broadcast message:')) {
+        const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
+        let sent = 0;
+        await tg.sendMessage(chatId, `⏳ Sending broadcast to ${allUsers.length} users...`);
+        for (const u of allUsers) {
+          try {
+            await tg.sendMessage(u.telegramId.toString(), txt);
+            sent++;
+          } catch (err) {} 
+        }
+        return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`);
+      }
+
+      // 3. User Lookup
+      if (promptText.includes('Enter Telegram User ID to manage:')) {
+        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
+        const targetTgId = BigInt(txt);
+        const uTarget = await prisma.user.findUnique({ where: { telegramId: targetTgId } });
+        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.');
+        
+        const isBan = await isBanned(targetTgId);
+        const info = `👤 *User Info*\n\n🆔 *ID:* \`${txt}\`\n💰 *Balance:* \`₹${esc(uTarget.balance)}\`\n👥 *Referrals:* \`${uTarget.totalReferrals}\`\n📅 *Joined:* \`${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}\``;
+        return await tg.sendMessage(chatId, info, KB.manageUser(txt, isBan));
+      }
+
+      // 4. Add Balance
+      if (promptText.includes('Enter amount to add to user:')) {
+        const uIdMatch = promptText.match(/user:\s*(\d+)/);
+        if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
+        const targetUId = uIdMatch[1];
+        const amt = Number(txt);
+        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
+        
+        const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
+        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
+
+        await prisma.$transaction([
+          prisma.user.update({ where: { id: uTarget.id }, data: { balance: { increment: amt } } }),
+          prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_ADDED', amount: amt, description: `Admin added balance` } })
+        ]);
+        
+        await tg.sendMessage(chatId, `✅ Added \`₹${amt}\` to user \`${targetUId}\`.`);
+        await tg.sendMessage(targetUId, `💰 *Balance Added*\n\nAn admin has added \`₹${amt}\` to your wallet.`);
+        return;
+      }
+
+      // 5. Deduct Balance
+      if (promptText.includes('Enter amount to deduct from user:')) {
+        const uIdMatch = promptText.match(/user:\s*(\d+)/);
+        if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
+        const targetUId = uIdMatch[1];
+        const amt = Number(txt);
+        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
+        
+        const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
+        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
+
+        await prisma.$transaction([
+          prisma.user.update({ where: { id: uTarget.id }, data: { balance: { decrement: amt } } }),
+          prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_REMOVED', amount: -amt, description: `Admin deducted balance` } })
+        ]);
+        
+        await tg.sendMessage(chatId, `✅ Deducted \`₹${amt}\` from user \`${targetUId}\`.`);
+        return;
+      }
+
+      // 6. SMS Settings Edit
+      if (promptText.includes('Enter new value for SMS setting:')) {
+        const fieldMatch = promptText.match(/setting:\s*(\w+)/);
+        if (!fieldMatch) return await tg.sendMessage(chatId, '❌ Failed to parse setting field.');
+        const field = fieldMatch[1];
+        
+        const cur = await getSmsSettings();
+        const numFields = ['maxPrice', 'timeout', 'interval'];
+        const val = numFields.includes(field) ? Number(txt) : txt;
+        
+        if (numFields.includes(field) && (isNaN(val) || val <= 0)) {
+          return await tg.sendMessage(chatId, '❌ Invalid number.');
+        }
+
+        const newSet = { ...cur, [field]: val };
+        await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
+        return await tg.sendMessage(chatId, `✅ SMS Setting \`${field}\` updated to \`${txt}\`.`);
+      }
+    }
+
+    // Start Command
+    if (txt.startsWith('/start')) {
+      const payload = txt.split(' ')[1];
+      if (payload) await processReferral(userId, payload);
+      const u = await getUser(userId);
+      if (!(await verifyAccess(chatId, userId))) return;
+      return await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
+    }
+
+    if (!(await verifyAccess(chatId, userId))) return;
+
+    // Regular & Admin Menu Buttons
+    switch (txt) {
+      // --- USER COMMANDS ---
+      case '🐦 Get Twitter Number':
+        const uBuy = await getUser(userId);
+        const act = await prisma.order.findFirst({ where: { userId: uBuy.id, status: 'ACTIVE' } });
+        if (act) return await tg.sendMessage(chatId, MSG.PLEASE_WAIT);
+        
+        const smsSet = await getSmsSettings();
+        if (uBuy.balance.toNumber() < smsSet.maxPrice) return await tg.sendMessage(chatId, MSG.NO_BALANCE);
+        
+        const loadMsg = await tg.sendMessage(chatId, MSG.PURCHASING);
+        const pr = await purchaseSms(smsSet);
+        if (!pr.success) return await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_FAILED);
+
+        try {
+          // DB Consistency: Strict atomic verification and order creation
+          const ord = await prisma.$transaction(async (tx) => {
+            const currentUser = await tx.user.findUnique({ where: { id: uBuy.id } });
+            if (currentUser.balance.toNumber() < smsSet.maxPrice) {
+              throw new Error('INSUFFICIENT_BALANCE');
+            }
+            const updatedUser = await tx.user.update({
+              where: { id: uBuy.id },
+              data: { balance: { decrement: smsSet.maxPrice } }
+            });
+            await tx.walletHistory.create({
+              data: { userId: updatedUser.id, type: 'NUMBER_PURCHASE', amount: -smsSet.maxPrice, description: `Purchased: ${pr.phoneNumber}` }
+            });
+            return await tx.order.create({
+              data: { userId: updatedUser.id, activationId: pr.activationId, phoneNumber: pr.phoneNumber, service: String(smsSet.serviceId), provider: 'API', price: smsSet.maxPrice, expiresAt: new Date(Date.now() + (smsSet.timeout * 1000)), status: 'ACTIVE' }
+            });
+          });
+
+          await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_SUCCESS.replace('{phoneNumber}', pr.phoneNumber).replace('{amount}', smsSet.maxPrice), KB.cancel(pr.activationId));
+          startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg.message_id, smsSet.timeout, smsSet.interval);
+        } catch (err) {
+          await cancelSms(pr.activationId); // Revert provider purchase if DB fails
+          if (err.message === 'INSUFFICIENT_BALANCE') return await tg.editMessage(chatId, loadMsg.message_id, MSG.NO_BALANCE);
+          return await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_FAILED);
+        }
+        break;
+
+      case '👤 My Account':
+        const uAcc = await getUser(userId);
+        const textAcc = MSG.MY_ACCOUNT.replace('{userId}', userId).replace('{firstName}', esc(uAcc.firstName||'')).replace('{username}', esc(uAcc.username?'@'+uAcc.username:'')).replace('{balance}', esc(uAcc.balance)).replace('{referrals}', uAcc.totalReferrals).replace('{date}', new Date(uAcc.createdAt).toLocaleDateString('en-IN'));
+        await tg.sendMessage(chatId, textAcc);
+        break;
+
+      case '📜 Wallet History':
+        const uHist = await getUser(userId);
+        const txs = await prisma.walletHistory.findMany({ where: { userId: uHist.id }, take: 10, orderBy: { createdAt: 'desc' } });
+        if (!txs.length) return await tg.sendMessage(chatId, MSG.WALLET_EMPTY);
+        let hTxt = "📜 *Wallet History*\n\n";
+        txs.forEach(t => hTxt += `📅 *${new Date(t.createdAt).toLocaleDateString('en-IN')}*\n🔹 *Type:* ${escMd(t.type)}\n💰 *Amount:* \`${t.amount>0?'+':''}${esc(t.amount)}\`\n📝 *Note:* _${escMd(t.description)}_\n\n`);
+        await tg.sendMessage(chatId, hTxt);
+        break;
+
+      case '💳 Add Balance':
+        const sUpi = await getSysSettings();
+        await tg.sendMessage(chatId, MSG.PAYMENT_INSTRUCT.replace('{upi}', esc(sUpi?.upiId || 'skywardstudio@ybl')));
+        break;
+
+      case '🎁 Refer & Earn':
+        const uRef = await getUser(userId);
+        const sysRef = await getSysSettings();
+        const rLink = `https://t.me/${CONFIG.telegram.botUsername}?start=${userId}`;
+        const rTxt = MSG.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0)).replace('{referralLink}', esc(rLink)) + `\n\n📊 *Your Stats*\n👥 *Referrals:* \`${uRef.totalReferrals}\`\n💰 *Earnings:* \`₹${esc(uRef.referralEarnings)}\``;
+        await tg.sendMessage(chatId, rTxt);
+        break;
+
+      case '📞 Support':
+        const sSup = await getSysSettings();
+        await tg.sendMessage(chatId, MSG.SUPPORT, KB.support(sSup?.supportUsername || CONFIG.telegram.supportUsername));
+        break;
+
+      // --- ADMIN COMMANDS ---
+      case '📊 Statistics':
+        if (!admin) return;
+        const totU = await prisma.user.count();
+        const actO = await prisma.order.count({ where: { status: 'ACTIVE' } });
+        const cmpO = await prisma.order.count({ where: { status: 'COMPLETED' } });
+        const rev = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'APPROVED' } });
+        const statMsg = `📊 *Bot Statistics*\n\n👥 *Total Users:* \`${totU}\`\n🔄 *Active Orders:* \`${actO}\`\n✅ *Completed Orders:* \`${cmpO}\`\n💰 *Total Revenue:* \`₹${rev._sum.amount || 0}\``;
+        await tg.sendMessage(chatId, statMsg);
+        break;
+
+      case '👥 Users':
+        if (!admin) return;
+        await tg.sendMessage(chatId, '👤 Enter Telegram User ID to manage:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case '💳 Payments':
+        if (!admin) return;
+        const pends = await prisma.payment.findMany({ where: { status: 'PENDING' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
+        if (!pends.length) return await tg.sendMessage(chatId, '💳 No pending payments.');
+        let pTxt = `💳 *Recent Pending Payments*\n\n`;
+        pends.forEach(p => pTxt += `🧾 *ID:* \`${p.id}\`\n👤 *User:* \`${p.user.telegramId}\`\n📅 *Date:* \`${new Date(p.createdAt).toLocaleDateString('en-IN')}\`\n\n`);
+        await tg.sendMessage(chatId, pTxt);
+        break;
+
+      case '🛒 Orders':
+        if (!admin) return;
+        const acts = await prisma.order.findMany({ where: { status: 'ACTIVE' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
+        if (!acts.length) return await tg.sendMessage(chatId, '🛒 No active orders.');
+        let oTxt = `🛒 *Recent Active Orders*\n\n`;
+        acts.forEach(o => oTxt += `📱 *Number:* \`${o.phoneNumber}\`\n👤 *User:* \`${o.user.telegramId}\`\n🔑 *OTPs:* \`${o.otpCount}\`\n\n`);
+        await tg.sendMessage(chatId, oTxt);
+        break;
+
+      case '📢 Broadcast':
+        if (!admin) return;
+        await tg.sendMessage(chatId, '📢 Enter broadcast message:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case '⚙️ Settings':
+        if (admin) await tg.sendMessage(chatId, "⚙️ *System Settings*", KB.adminSettings());
+        break;
+    }
+  }
+
+  // --- CALLBACK ROUTER ---
+  if (update.callback_query) {
+    const cb = update.callback_query;
+    const chatId = cb.message?.chat?.id;
+    const msgId = cb.message?.message_id;
+    const userId = cb.from?.id;
+    if (!chatId || !userId) return;
+
+    try { await tg.answerCallbackQuery(cb.id); } catch(e){}
+    const dataParts = cb.data ? cb.data.split(':') : [];
+    const action = dataParts[0];
+    const args = dataParts.slice(1);
+    const admin = await isAdmin(userId);
+
+    switch (action) {
+      // User Actions
+      case 'verify_join':
+        if (await verifyAccess(chatId, userId)) {
+          await tg.editMessage(chatId, msgId, MSG.VERIFIED_SUCCESS);
+          await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
+        }
+        break;
+
+      case 'cancel_order':
+        const uCan = await getUser(userId);
+        const oCan = await prisma.order.findFirst({ where: { userId: uCan.id, status: 'ACTIVE', activationId: args[0] } });
+        if (!oCan) return await tg.editMessage(chatId, msgId, MSG.UNKNOWN_ERROR);
+        if (oCan.otpCount > 0) return await tg.sendMessage(chatId, MSG.PLEASE_WAIT);
+        
+        await cancelSms(args[0]);
+
+        // DB Consistency: Cancel order and refund atomically
+        await prisma.$transaction([
+          prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
+          prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } }),
+          prisma.walletHistory.create({ data: { userId: uCan.id, type: 'REFUND', amount: oCan.price, description: `Manual refund: ${oCan.phoneNumber}` } })
+        ]);
+        
+        await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED);
+        break;
+
+      // Admin Actions
+      case 'approve_payment':
+        if (!admin) return;
+        await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
+        await tg.sendMessage(chatId, `💰 Enter deposit amount for payment ID: ${args[0]}\nUser ID: ${args[1]}`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'reject_payment':
+        if (!admin) return;
+        await prisma.payment.update({ where: { id: args[0] }, data: { status: 'REJECTED' } });
+        await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
+        await tg.sendMessage(chatId, `❌ Payment \`${args[0]}\` Rejected.`);
+        await tg.sendMessage(args[1], MSG.PAYMENT_REJECTED);
+        break;
+
+      case 'admin_maintenance':
+        if (!admin) return;
+        const s = await getSysSettings();
+        await tg.editMessage(chatId, msgId, "🛠️ *Maintenance Mode*\n\nToggles user access.", KB.maintenance(s.isMaintenanceMode));
+        break;
+
+      case 'toggle_maintenance':
+        if (!admin) return;
+        const cur = await getSysSettings();
+        const newVal = !cur.isMaintenanceMode;
+        await prisma.setting.upsert({ where: { key: 'SYSTEM_SETTINGS' }, update: { value: JSON.stringify({...cur, isMaintenanceMode: newVal}) }, create: { key: 'SYSTEM_SETTINGS', value: JSON.stringify({isMaintenanceMode: newVal}) } });
+        await tg.editMessage(chatId, msgId, "🛠️ *Maintenance Mode*\n\nToggles user access.", KB.maintenance(newVal));
+        break;
+        
+      case 'admin_sms_settings':
+        if (!admin) return;
+        await tg.editMessage(chatId, msgId, "📡 *SMS Settings*\n\nSelect a field to modify.", KB.smsSettings());
+        break;
+
+      case 'admin_sms_current':
+        if (!admin) return;
+        const smsConf = await getSmsSettings();
+        await tg.sendMessage(chatId, `📄 *Current Config*\nCountry: \`${smsConf.countryId}\`\nOperator: \`${smsConf.operatorId}\`\nService: \`${smsConf.serviceId}\`\nPrice: \`₹${smsConf.maxPrice}\`\nTimeout: \`${smsConf.timeout}s\`\nInterval: \`${smsConf.interval}s\``);
+        break;
+
+      case 'admin_sms_edit':
+        if (!admin) return;
+        await tg.sendMessage(chatId, `📡 Enter new value for SMS setting: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'toggle_ban':
+        if (!admin) return;
+        const targetTgId = BigInt(args[0]);
+        const isBan = await isBanned(targetTgId);
+        if (isBan) {
+          await prisma.bannedUser.delete({ where: { telegramId: targetTgId } });
+          await tg.sendMessage(chatId, `✅ User \`${args[0]}\` unbanned.`);
+        } else {
+          await prisma.bannedUser.create({ data: { telegramId: targetTgId } });
+          await tg.sendMessage(chatId, `⛔ User \`${args[0]}\` banned.`);
+        }
+        await tg.editMessageReplyMarkup(chatId, msgId, KB.manageUser(args[0], !isBan));
+        break;
+
+      case 'admin_add_bal':
+        if (!admin) return;
+        await tg.sendMessage(chatId, `➕ Enter amount to add to user: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'admin_ded_bal':
+        if (!admin) return;
+        await tg.sendMessage(chatId, `➖ Enter amount to deduct from user: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+    }
+  }
+}
+
 server.post('/webhook', async (req, reply) => {
   if (req.headers['x-telegram-bot-api-secret-token'] !== CONFIG.webhook.secret) {
-    return reply.status(401).send({ error: 'Unauthorized' });
+    return reply.code(401).send({ error: 'Unauthorized' });
   }
-  reply.status(200).send({ ok: true });
 
   try {
-    const update = req.body;
-
-    // --- MESSAGE ROUTER ---
-    if (update.message) {
-      const msg = update.message;
-      const chatId = msg.chat?.id;
-      const userId = msg.from?.id;
-      if (!chatId || !userId) return;
-
-      const admin = await isAdmin(userId);
-
-      // Handle Photos (Payment Screenshots)
-      if (msg.photo?.length > 0) {
-        if (!(await verifyAccess(chatId, userId))) return;
-        const u = await getUser(userId);
-        const photoId = msg.photo[msg.photo.length - 1].file_id;
-        const p = await prisma.payment.create({ data: { userId: u.id, photoFileId: photoId, status: 'PENDING' } });
-        
-        const sys = await getSysSettings();
-        const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
-        if (aId) {
-          const caption = `💳 *New Payment Request*\n\n🆔 *User ID:* \`${userId}\`\n🧾 *Payment ID:* \`${p.id}\``;
-          await tg.sendPhoto(aId, photoId, { caption, reply_markup: KB.approveReject(p.id, userId) });
-        }
-        return await tg.sendMessage(chatId, MSG.PAYMENT_SUBMITTED);
-      }
-
-      if (!msg.text) return;
-      const txt = msg.text.trim();
-
-      // Handle Admin ForceReplies (Robust Regex Parsing to prevent null crash)
-      if (admin && msg.reply_to_message?.text) {
-        const promptText = msg.reply_to_message.text;
-
-        // 1. Payment Approval
-        if (promptText.includes('Enter deposit amount for payment ID:')) {
-          const pIdMatch = promptText.match(/payment ID:\s*(\S+)/);
-          const uIdMatch = promptText.match(/User ID:\s*(\d+)/);
-          if (!pIdMatch || !uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse payment context.');
-          
-          const pId = pIdMatch[1];
-          const targetUId = uIdMatch[1];
-          
-          const amt = Number(txt);
-          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
-          
-          const p = await prisma.payment.findUnique({ where: { id: pId } });
-          if (!p || p.status !== 'PENDING') return await tg.sendMessage(chatId, '⚠️ Payment not pending or already processed.');
-
-          const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
-          if (!uTarget) return await tg.sendMessage(chatId, '❌ Target user not found.');
-
-          // DB Consistency: Atomic payment resolution and wallet update
-          await prisma.$transaction([
-            prisma.payment.update({ where: { id: p.id }, data: { status: 'APPROVED', amount: amt } }),
-            prisma.user.update({ where: { id: uTarget.id }, data: { balance: { increment: amt } } }),
-            prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'DEPOSIT', amount: amt, description: `Payment approved: ${p.id}` } })
-          ]);
-          
-          await tg.sendMessage(chatId, `✅ Payment \`${p.id}\` processed. Added \`₹${amt}\` to User \`${targetUId}\`.`);
-          await tg.sendMessage(targetUId, MSG.PAYMENT_APPROVED.replace('{amount}', esc(amt)));
-          return;
-        }
-
-        // 2. Broadcast Message
-        if (promptText.includes('Enter broadcast message:')) {
-          const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
-          let sent = 0;
-          await tg.sendMessage(chatId, `⏳ Sending broadcast to ${allUsers.length} users...`);
-          for (const u of allUsers) {
-            try {
-              await tg.sendMessage(u.telegramId.toString(), txt);
-              sent++;
-            } catch (err) {} 
-          }
-          return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`);
-        }
-
-        // 3. User Lookup
-        if (promptText.includes('Enter Telegram User ID to manage:')) {
-          if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
-          const targetTgId = BigInt(txt);
-          const uTarget = await prisma.user.findUnique({ where: { telegramId: targetTgId } });
-          if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.');
-          
-          const isBan = await isBanned(targetTgId);
-          const info = `👤 *User Info*\n\n🆔 *ID:* \`${txt}\`\n💰 *Balance:* \`₹${esc(uTarget.balance)}\`\n👥 *Referrals:* \`${uTarget.totalReferrals}\`\n📅 *Joined:* \`${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}\``;
-          return await tg.sendMessage(chatId, info, KB.manageUser(txt, isBan));
-        }
-
-        // 4. Add Balance
-        if (promptText.includes('Enter amount to add to user:')) {
-          const uIdMatch = promptText.match(/user:\s*(\d+)/);
-          if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
-          const targetUId = uIdMatch[1];
-          const amt = Number(txt);
-          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
-          
-          const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
-          if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
-
-          await prisma.$transaction([
-            prisma.user.update({ where: { id: uTarget.id }, data: { balance: { increment: amt } } }),
-            prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_ADDED', amount: amt, description: `Admin added balance` } })
-          ]);
-          
-          await tg.sendMessage(chatId, `✅ Added \`₹${amt}\` to user \`${targetUId}\`.`);
-          await tg.sendMessage(targetUId, `💰 *Balance Added*\n\nAn admin has added \`₹${amt}\` to your wallet.`);
-          return;
-        }
-
-        // 5. Deduct Balance
-        if (promptText.includes('Enter amount to deduct from user:')) {
-          const uIdMatch = promptText.match(/user:\s*(\d+)/);
-          if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
-          const targetUId = uIdMatch[1];
-          const amt = Number(txt);
-          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
-          
-          const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
-          if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
-
-          await prisma.$transaction([
-            prisma.user.update({ where: { id: uTarget.id }, data: { balance: { decrement: amt } } }),
-            prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_REMOVED', amount: -amt, description: `Admin deducted balance` } })
-          ]);
-          
-          await tg.sendMessage(chatId, `✅ Deducted \`₹${amt}\` from user \`${targetUId}\`.`);
-          return;
-        }
-
-        // 6. SMS Settings Edit
-        if (promptText.includes('Enter new value for SMS setting:')) {
-          const fieldMatch = promptText.match(/setting:\s*(\w+)/);
-          if (!fieldMatch) return await tg.sendMessage(chatId, '❌ Failed to parse setting field.');
-          const field = fieldMatch[1];
-          
-          const cur = await getSmsSettings();
-          const numFields = ['maxPrice', 'timeout', 'interval'];
-          const val = numFields.includes(field) ? Number(txt) : txt;
-          
-          if (numFields.includes(field) && (isNaN(val) || val <= 0)) {
-            return await tg.sendMessage(chatId, '❌ Invalid number.');
-          }
-
-          const newSet = { ...cur, [field]: val };
-          await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
-          return await tg.sendMessage(chatId, `✅ SMS Setting \`${field}\` updated to \`${txt}\`.`);
-        }
-      }
-
-      // Start Command
-      if (txt.startsWith('/start')) {
-        const payload = txt.split(' ')[1];
-        if (payload) await processReferral(userId, payload);
-        const u = await getUser(userId);
-        if (!(await verifyAccess(chatId, userId))) return;
-        return await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
-      }
-
-      if (!(await verifyAccess(chatId, userId))) return;
-
-      // Regular & Admin Menu Buttons
-      switch (txt) {
-        // --- USER COMMANDS ---
-        case '🐦 Get Twitter Number':
-          const uBuy = await getUser(userId);
-          const act = await prisma.order.findFirst({ where: { userId: uBuy.id, status: 'ACTIVE' } });
-          if (act) return await tg.sendMessage(chatId, MSG.PLEASE_WAIT);
-          
-          const smsSet = await getSmsSettings();
-          if (uBuy.balance.toNumber() < smsSet.maxPrice) return await tg.sendMessage(chatId, MSG.NO_BALANCE);
-          
-          const loadMsg = await tg.sendMessage(chatId, MSG.PURCHASING);
-          const pr = await purchaseSms(smsSet);
-          if (!pr.success) return await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_FAILED);
-
-          try {
-            // DB Consistency: Strict atomic verification and order creation
-            const ord = await prisma.$transaction(async (tx) => {
-              const currentUser = await tx.user.findUnique({ where: { id: uBuy.id } });
-              if (currentUser.balance.toNumber() < smsSet.maxPrice) {
-                throw new Error('INSUFFICIENT_BALANCE');
-              }
-              const updatedUser = await tx.user.update({
-                where: { id: uBuy.id },
-                data: { balance: { decrement: smsSet.maxPrice } }
-              });
-              await tx.walletHistory.create({
-                data: { userId: updatedUser.id, type: 'NUMBER_PURCHASE', amount: -smsSet.maxPrice, description: `Purchased: ${pr.phoneNumber}` }
-              });
-              return await tx.order.create({
-                data: { userId: updatedUser.id, activationId: pr.activationId, phoneNumber: pr.phoneNumber, service: String(smsSet.serviceId), provider: 'API', price: smsSet.maxPrice, expiresAt: new Date(Date.now() + (smsSet.timeout * 1000)), status: 'ACTIVE' }
-              });
-            });
-
-            await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_SUCCESS.replace('{phoneNumber}', pr.phoneNumber).replace('{amount}', smsSet.maxPrice), KB.cancel(pr.activationId));
-            startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg.message_id, smsSet.timeout, smsSet.interval);
-          } catch (err) {
-            await cancelSms(pr.activationId); // Revert provider purchase if DB fails
-            if (err.message === 'INSUFFICIENT_BALANCE') return await tg.editMessage(chatId, loadMsg.message_id, MSG.NO_BALANCE);
-            return await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_FAILED);
-          }
-          break;
-
-        case '👤 My Account':
-          const uAcc = await getUser(userId);
-          const textAcc = MSG.MY_ACCOUNT.replace('{userId}', userId).replace('{firstName}', esc(uAcc.firstName||'')).replace('{username}', esc(uAcc.username?'@'+uAcc.username:'')).replace('{balance}', esc(uAcc.balance)).replace('{referrals}', uAcc.totalReferrals).replace('{date}', new Date(uAcc.createdAt).toLocaleDateString('en-IN'));
-          await tg.sendMessage(chatId, textAcc);
-          break;
-
-        case '📜 Wallet History':
-          const uHist = await getUser(userId);
-          const txs = await prisma.walletHistory.findMany({ where: { userId: uHist.id }, take: 10, orderBy: { createdAt: 'desc' } });
-          if (!txs.length) return await tg.sendMessage(chatId, MSG.WALLET_EMPTY);
-          let hTxt = "📜 *Wallet History*\n\n";
-          txs.forEach(t => hTxt += `📅 *${new Date(t.createdAt).toLocaleDateString('en-IN')}*\n🔹 *Type:* ${escMd(t.type)}\n💰 *Amount:* \`${t.amount>0?'+':''}${esc(t.amount)}\`\n📝 *Note:* _${escMd(t.description)}_\n\n`);
-          await tg.sendMessage(chatId, hTxt);
-          break;
-
-        case '💳 Add Balance':
-          const sUpi = await getSysSettings();
-          await tg.sendMessage(chatId, MSG.PAYMENT_INSTRUCT.replace('{upi}', esc(sUpi?.upiId || 'skywardstudio@ybl')));
-          break;
-
-        case '🎁 Refer & Earn':
-          const uRef = await getUser(userId);
-          const sysRef = await getSysSettings();
-          const rLink = `https://t.me/${CONFIG.telegram.botUsername}?start=${userId}`;
-          const rTxt = MSG.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0)).replace('{referralLink}', esc(rLink)) + `\n\n📊 *Your Stats*\n👥 *Referrals:* \`${uRef.totalReferrals}\`\n💰 *Earnings:* \`₹${esc(uRef.referralEarnings)}\``;
-          await tg.sendMessage(chatId, rTxt);
-          break;
-
-        case '📞 Support':
-          const sSup = await getSysSettings();
-          await tg.sendMessage(chatId, MSG.SUPPORT, KB.support(sSup?.supportUsername || CONFIG.telegram.supportUsername));
-          break;
-
-        // --- ADMIN COMMANDS ---
-        case '📊 Statistics':
-          if (!admin) return;
-          const totU = await prisma.user.count();
-          const actO = await prisma.order.count({ where: { status: 'ACTIVE' } });
-          const cmpO = await prisma.order.count({ where: { status: 'COMPLETED' } });
-          const rev = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'APPROVED' } });
-          const statMsg = `📊 *Bot Statistics*\n\n👥 *Total Users:* \`${totU}\`\n🔄 *Active Orders:* \`${actO}\`\n✅ *Completed Orders:* \`${cmpO}\`\n💰 *Total Revenue:* \`₹${rev._sum.amount || 0}\``;
-          await tg.sendMessage(chatId, statMsg);
-          break;
-
-        case '👥 Users':
-          if (!admin) return;
-          await tg.sendMessage(chatId, '👤 Enter Telegram User ID to manage:', { reply_markup: { force_reply: true, selective: true } });
-          break;
-
-        case '💳 Payments':
-          if (!admin) return;
-          const pends = await prisma.payment.findMany({ where: { status: 'PENDING' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
-          if (!pends.length) return await tg.sendMessage(chatId, '💳 No pending payments.');
-          let pTxt = `💳 *Recent Pending Payments*\n\n`;
-          pends.forEach(p => pTxt += `🧾 *ID:* \`${p.id}\`\n👤 *User:* \`${p.user.telegramId}\`\n📅 *Date:* \`${new Date(p.createdAt).toLocaleDateString('en-IN')}\`\n\n`);
-          await tg.sendMessage(chatId, pTxt);
-          break;
-
-        case '🛒 Orders':
-          if (!admin) return;
-          const acts = await prisma.order.findMany({ where: { status: 'ACTIVE' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
-          if (!acts.length) return await tg.sendMessage(chatId, '🛒 No active orders.');
-          let oTxt = `🛒 *Recent Active Orders*\n\n`;
-          acts.forEach(o => oTxt += `📱 *Number:* \`${o.phoneNumber}\`\n👤 *User:* \`${o.user.telegramId}\`\n🔑 *OTPs:* \`${o.otpCount}\`\n\n`);
-          await tg.sendMessage(chatId, oTxt);
-          break;
-
-        case '📢 Broadcast':
-          if (!admin) return;
-          await tg.sendMessage(chatId, '📢 Enter broadcast message:', { reply_markup: { force_reply: true, selective: true } });
-          break;
-
-        case '⚙️ Settings':
-          if (admin) await tg.sendMessage(chatId, "⚙️ *System Settings*", KB.adminSettings());
-          break;
-      }
-    }
-
-    // --- CALLBACK ROUTER ---
-    if (update.callback_query) {
-      const cb = update.callback_query;
-      const chatId = cb.message?.chat?.id;
-      const msgId = cb.message?.message_id;
-      const userId = cb.from?.id;
-      if (!chatId || !userId) return;
-
-      try { await tg.answerCallbackQuery(cb.id); } catch(e){}
-      const dataParts = cb.data ? cb.data.split(':') : [];
-      const action = dataParts[0];
-      const args = dataParts.slice(1);
-      const admin = await isAdmin(userId);
-
-      switch (action) {
-        // User Actions
-        case 'verify_join':
-          if (await verifyAccess(chatId, userId)) {
-            await tg.editMessage(chatId, msgId, MSG.VERIFIED_SUCCESS);
-            await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
-          }
-          break;
-
-        case 'cancel_order':
-          const uCan = await getUser(userId);
-          const oCan = await prisma.order.findFirst({ where: { userId: uCan.id, status: 'ACTIVE', activationId: args[0] } });
-          if (!oCan) return await tg.editMessage(chatId, msgId, MSG.UNKNOWN_ERROR);
-          if (oCan.otpCount > 0) return await tg.sendMessage(chatId, MSG.PLEASE_WAIT);
-          
-          await cancelSms(args[0]);
-
-          // DB Consistency: Cancel order and refund atomically
-          await prisma.$transaction([
-            prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
-            prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } }),
-            prisma.walletHistory.create({ data: { userId: uCan.id, type: 'REFUND', amount: oCan.price, description: `Manual refund: ${oCan.phoneNumber}` } })
-          ]);
-          
-          await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED);
-          break;
-
-        // Admin Actions
-        case 'approve_payment':
-          if (!admin) return;
-          await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
-          await tg.sendMessage(chatId, `💰 Enter deposit amount for payment ID: ${args[0]}\nUser ID: ${args[1]}`, { reply_markup: { force_reply: true, selective: true } });
-          break;
-
-        case 'reject_payment':
-          if (!admin) return;
-          await prisma.payment.update({ where: { id: args[0] }, data: { status: 'REJECTED' } });
-          await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
-          await tg.sendMessage(chatId, `❌ Payment \`${args[0]}\` Rejected.`);
-          await tg.sendMessage(args[1], MSG.PAYMENT_REJECTED);
-          break;
-
-        case 'admin_maintenance':
-          if (!admin) return;
-          const s = await getSysSettings();
-          await tg.editMessage(chatId, msgId, "🛠️ *Maintenance Mode*\n\nToggles user access.", KB.maintenance(s.isMaintenanceMode));
-          break;
-
-        case 'toggle_maintenance':
-          if (!admin) return;
-          const cur = await getSysSettings();
-          const newVal = !cur.isMaintenanceMode;
-          await prisma.setting.upsert({ where: { key: 'SYSTEM_SETTINGS' }, update: { value: JSON.stringify({...cur, isMaintenanceMode: newVal}) }, create: { key: 'SYSTEM_SETTINGS', value: JSON.stringify({isMaintenanceMode: newVal}) } });
-          await tg.editMessage(chatId, msgId, "🛠️ *Maintenance Mode*\n\nToggles user access.", KB.maintenance(newVal));
-          break;
-          
-        case 'admin_sms_settings':
-          if (!admin) return;
-          await tg.editMessage(chatId, msgId, "📡 *SMS Settings*\n\nSelect a field to modify.", KB.smsSettings());
-          break;
-
-        case 'admin_sms_current':
-          if (!admin) return;
-          const smsConf = await getSmsSettings();
-          await tg.sendMessage(chatId, `📄 *Current Config*\nCountry: \`${smsConf.countryId}\`\nOperator: \`${smsConf.operatorId}\`\nService: \`${smsConf.serviceId}\`\nPrice: \`₹${smsConf.maxPrice}\`\nTimeout: \`${smsConf.timeout}s\`\nInterval: \`${smsConf.interval}s\``);
-          break;
-
-        case 'admin_sms_edit':
-          if (!admin) return;
-          await tg.sendMessage(chatId, `📡 Enter new value for SMS setting: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
-          break;
-
-        case 'toggle_ban':
-          if (!admin) return;
-          const targetTgId = BigInt(args[0]);
-          const isBan = await isBanned(targetTgId);
-          if (isBan) {
-            await prisma.bannedUser.delete({ where: { telegramId: targetTgId } });
-            await tg.sendMessage(chatId, `✅ User \`${args[0]}\` unbanned.`);
-          } else {
-            await prisma.bannedUser.create({ data: { telegramId: targetTgId } });
-            await tg.sendMessage(chatId, `⛔ User \`${args[0]}\` banned.`);
-          }
-          await tg.editMessageReplyMarkup(chatId, msgId, KB.manageUser(args[0], !isBan));
-          break;
-
-        case 'admin_add_bal':
-          if (!admin) return;
-          await tg.sendMessage(chatId, `➕ Enter amount to add to user: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
-          break;
-
-        case 'admin_ded_bal':
-          if (!admin) return;
-          await tg.sendMessage(chatId, `➖ Enter amount to deduct from user: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
-          break;
-      }
-    }
-  } catch (error) { server.log.error(error); }
+    await handleUpdate(req.body);
+    return reply.code(200).send({ ok: true });
+  } catch (error) {
+    server.log.error(error);
+    return reply.code(500).send({ error: "Webhook failed" });
+  }
 });
 
 // ==========================================
