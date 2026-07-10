@@ -46,11 +46,14 @@ async function startOtpPolling(chatId, userId, orderId, activationId, phoneNumbe
   let lastOtp = null;
 
   try {
+    const user = await getUser(userId);
+    if (!user) return;
+
     while (Date.now() < endTime) {
       await new Promise(resolve => setTimeout(resolve, intervalMs));
 
       // 1. Verify order is still ACTIVE (hasn't been manually cancelled)
-      const currentOrder = await getActiveOrder(userId);
+      const currentOrder = await getActiveOrder(user.id);
       if (!currentOrder || currentOrder.id !== orderId || currentOrder.status !== 'ACTIVE') {
         return; // Polling aborted externally
       }
@@ -100,7 +103,7 @@ async function startOtpPolling(chatId, userId, orderId, activationId, phoneNumbe
     // ==========================================
     // TIMEOUT HANDLING
     // ==========================================
-    const finalOrderCheck = await getActiveOrder(userId);
+    const finalOrderCheck = await getActiveOrder(user.id);
     if (!finalOrderCheck || finalOrderCheck.id !== orderId || finalOrderCheck.status !== 'ACTIVE') {
       return;
     }
@@ -142,17 +145,21 @@ export async function handleBuyNumber(chatId, userId) {
       return await sendMessage(chatId, MESSAGES.USER_BANNED);
     }
 
-    // 3. Prevent Multiple Active Orders
-    const activeOrder = await getActiveOrder(userId);
+    // 3. Fetch User and Prevent Multiple Active Orders
+    const user = await getUser(userId);
+    if (!user) {
+      return await sendMessage(chatId, MESSAGES.INTERNAL_ERROR);
+    }
+
+    const activeOrder = await getActiveOrder(user.id);
     if (activeOrder) {
       return await sendMessage(chatId, MESSAGES.PLEASE_WAIT);
     }
 
     // 4. Fetch SMS Settings & Check Wallet Balance
     const smsSettings = await getSmsSettings();
-    const user = await getUser(userId);
     
-    if (!user || user.balance < smsSettings.maxPrice) {
+    if (user.balance < smsSettings.maxPrice) {
       return await sendMessage(chatId, MESSAGES.INSUFFICIENT_WALLET_BALANCE);
     }
 
@@ -177,7 +184,7 @@ export async function handleBuyNumber(chatId, userId) {
 
     // 8. Create Order in Database (Price is omitted per schema limits)
     const order = await createOrder({
-      userId,
+      userId: user.id,
       activationId,
       phoneNumber,
       status: 'ACTIVE'
@@ -218,8 +225,13 @@ export async function handleBuyNumber(chatId, userId) {
  */
 export async function handleCancelOrder(chatId, userId, activationId, messageId) {
   try {
+    const user = await getUser(userId);
+    if (!user) {
+      return await editMessage(chatId, messageId, MESSAGES.UNKNOWN_ERROR);
+    }
+
     // 1. Check if order is still active
-    const activeOrder = await getActiveOrder(userId);
+    const activeOrder = await getActiveOrder(user.id);
     
     if (!activeOrder || activeOrder.activationId !== activationId || activeOrder.status !== 'ACTIVE') {
       return await editMessage(chatId, messageId, MESSAGES.UNKNOWN_ERROR);
