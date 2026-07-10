@@ -177,3 +177,15 @@ export function getMaintenanceMode(isMaintenance) {
     ]
   };
 }
+export function getSupportMenu(supportUsername) {
+  return {
+    inline_keyboard: [
+      [
+        BTN.url(
+          "💬 Contact Support",
+          `https://t.me/${supportUsername.replace("@", "")}`
+        )
+      ]
+    ]
+  };
+}
