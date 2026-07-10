@@ -8,7 +8,6 @@ import * as tg from './telegram.js';
 // 1. GLOBAL INITIALIZATION & CONFIGURATION
 // ==========================================
 
-// Fix BigInt serialization crash for Fastify/JSON responses
 BigInt.prototype.toJSON = function () { return this.toString(); };
 
 const prisma = globalThis.prisma || new PrismaClient();
@@ -18,38 +17,38 @@ const server = Fastify({ logger: true, trustProxy: true });
 server.register(formbody);
 
 // ==========================================
-// 2. CONSTANTS: MESSAGES & KEYBOARDS
+// 2. CONSTANTS: MESSAGES & KEYBOARDS (HTML)
 // ==========================================
 
 const MSG = {
-  WELCOME: "👋 *Welcome to our Premium OTP Service\\!*\n\nPlease use the menu below to navigate\\.",
-  PLEASE_WAIT: "✋ Please wait a moment before trying again\\.",
-  MAINTENANCE_MODE: "🛠️ *Maintenance Mode*\n\nOur service is currently undergoing scheduled maintenance\\.",
-  INTERNAL_ERROR: "❌ *System Error*\n\nAn unexpected error occurred\\.",
-  UNKNOWN_ERROR: "❓ *Unknown Error*\n\nSomething went wrong\\. Please try again later\\.",
-  FORCE_JOIN: "⚠️ *Access Restricted*\n\nYou must join our official channels to use this bot\\. Please join using the links below, then click *Verify*\\.",
-  VERIFIED_SUCCESS: "✅ *Verification Successful*\n\nWelcome aboard\\! You now have full access to the bot\\.",
-  VERIFIED_FAILED: "❌ *Verification Failed*\n\nWe couldn't verify your membership\\.",
-  PURCHASING: "🔄 *Purchasing Number\\.\\.\\.*\n\nPlease wait while we reserve a number for you\\.",
-  NUMBER_SUCCESS: "✅ *Number Purchased successfully\\!*\n\n📱 *Number:* `{phoneNumber}`\n💰 *Price:* `₹{amount}`\n\n_Waiting for OTP\\.\\.\\._",
-  NUMBER_FAILED: "❌ *Purchase Failed*\n\nWe couldn't acquire a number at this time\\. Please try again later\\.",
-  NO_BALANCE: "⚠️ *Insufficient Balance*\n\nPlease add funds to your wallet to purchase this number\\.",
-  OTP_1: "📩 *OTP Received \\(1/3\\)*\n\n📱 *Number:* `{phoneNumber}`\n🔑 *OTP Code:* `{otp}`",
-  OTP_2: "📩 *OTP Received \\(2/3\\)*\n\n📱 *Number:* `{phoneNumber}`\n🔑 *OTP Code:* `{otp}`",
-  OTP_3: "📩 *Final OTP Received \\(3/3\\)*\n\n📱 *Number:* `{phoneNumber}`\n🔑 *OTP Code:* `{otp}`\n\n_Order completed automatically\\._",
-  OTP_TIMEOUT_REFUND: "⏱ *Timeout Reached*\n\nNo OTP was received in time\\. `₹{amount}` has been refunded to your wallet\\.",
-  OTP_TIMEOUT_NO_REFUND: "⏱ *Timeout Reached*\n\nSession ended\\. No refund issued as OTPs were received\\.",
-  ORDER_CANCELLED: "🛑 *Number Cancelled*\n\nThe number was cancelled and your funds have been refunded\\.",
-  PAYMENT_INSTRUCT: "━━━━━━━━━━━━━━━━━━━━\n💳 UPI ID:\n`{upi}`\n\n📷 After completing the payment, send the payment screenshot\\.\n\n📝 In the photo caption, write ONLY the payment amount\\.\n\nExample:\n100\n\n❌ Don't write:\nAmount: 100\nPaid 100\n100 INR\nPayment done\n\n✅ Write only:\n100\n━━━━━━━━━━━━━━━━━━━━",
-  PAYMENT_CAPTION_ERROR: "❌ Please send the payment screenshot with only the amount in the caption\\. Example: 100",
-  PAYMENT_SUBMITTED: "📤 *Payment Submitted*\n\nYour screenshot has been sent to the admin for review\\. Please wait for approval\\.",
-  PAYMENT_APPROVED: "✅ *Payment Approved*\n\n`₹{amount}` has been successfully added to your wallet\\.",
-  PAYMENT_REJECTED: "❌ *Payment Rejected*\n\nYour recent payment submission was declined\\. Contact support if you need help\\.",
-  WALLET_EMPTY: "📜 *Wallet History*\n\nYou have no recent transactions\\.",
-  MY_ACCOUNT: "👤 *My Account*\n\n🆔 *User ID:* `{userId}`\n🗣 *Name:* {firstName} {username}\n💰 *Balance:* `₹{balance}`\n👥 *Referrals:* `{referrals}`\n📅 *Joined:* `{date}`",
-  REFER_INFO: "🎁 *Refer & Earn*\n\nInvite your friends and earn `₹{amount}` for every successful signup\\!\n\n🔗 *Your Referral Link:*\n{referralLink}",
-  SUPPORT: "📞 *Support*\n\nIf you need assistance, please contact our support team below\\.",
-  BANNED: "⛔ *User Banned*\n\nYou have been restricted from using the bot\\."
+  WELCOME: "👋 <b>Welcome to our Premium OTP Service!</b>\n\nPlease use the menu below to navigate.",
+  PLEASE_WAIT: "✋ Please wait a moment before trying again.",
+  MAINTENANCE_MODE: "🛠️ <b>Maintenance Mode</b>\n\nOur service is currently undergoing scheduled maintenance.",
+  INTERNAL_ERROR: "❌ <b>System Error</b>\n\nAn unexpected error occurred.",
+  UNKNOWN_ERROR: "❓ <b>Unknown Error</b>\n\nSomething went wrong. Please try again later.",
+  FORCE_JOIN: "⚠️ <b>Access Restricted</b>\n\nYou must join our official channels to use this bot. Please join using the links below, then click <b>Verify</b>.",
+  VERIFIED_SUCCESS: "✅ <b>Verification Successful</b>\n\nWelcome aboard! You now have full access to the bot.",
+  VERIFIED_FAILED: "❌ <b>Verification Failed</b>\n\nWe couldn't verify your membership.",
+  PURCHASING: "🔄 <b>Purchasing Number...</b>\n\nPlease wait while we reserve a number for you.",
+  NUMBER_SUCCESS: "✅ <b>Number Purchased successfully!</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n💰 <b>Price:</b> <code>₹{amount}</code>\n\n<i>Waiting for OTP...</i>",
+  NUMBER_FAILED: "❌ <b>Purchase Failed</b>\n\nWe couldn't acquire a number at this time. Please try again later.",
+  NO_BALANCE: "⚠️ <b>Insufficient Balance</b>\n\nPlease add funds to your wallet to purchase this number.",
+  OTP_1: "📩 <b>OTP Received (1/3)</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n🔑 <b>OTP Code:</b> <code>{otp}</code>",
+  OTP_2: "📩 <b>OTP Received (2/3)</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n🔑 <b>OTP Code:</b> <code>{otp}</code>",
+  OTP_3: "📩 <b>Final OTP Received (3/3)</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n🔑 <b>OTP Code:</b> <code>{otp}</code>\n\n<i>Order completed automatically.</i>",
+  OTP_TIMEOUT_REFUND: "⏱ <b>Timeout Reached</b>\n\nNo OTP was received in time. <code>₹{amount}</code> has been refunded to your wallet.",
+  OTP_TIMEOUT_NO_REFUND: "⏱ <b>Timeout Reached</b>\n\nSession ended. No refund issued as OTPs were received.",
+  ORDER_CANCELLED: "🛑 <b>Number Cancelled</b>\n\nThe number was cancelled and your funds have been refunded.",
+  PAYMENT_INSTRUCT: "━━━━━━━━━━━━━━━━━━━━\n💳 UPI ID:\n<code>{upi}</code>\n\n📷 After completing the payment, send the payment screenshot.\n\n📝 In the photo caption, write ONLY the payment amount.\n\nExample:\n100\n\n❌ Don't write:\nAmount: 100\nPaid 100\n100 INR\nPayment done\n\n✅ Write only:\n100\n━━━━━━━━━━━━━━━━━━━━",
+  PAYMENT_CAPTION_ERROR: "❌ Please send the payment screenshot with only the amount in the caption. Example: 100",
+  PAYMENT_SUBMITTED: "📤 <b>Payment Submitted</b>\n\nYour screenshot has been sent to the admin for review. Please wait for approval.",
+  PAYMENT_APPROVED: "✅ <b>Payment Approved</b>\n\n<code>₹{amount}</code> has been successfully added to your wallet.",
+  PAYMENT_REJECTED: "❌ <b>Payment Rejected</b>\n\nYour recent payment submission was declined. Contact support if you need help.",
+  WALLET_EMPTY: "📜 <b>Wallet History</b>\n\nYou have no recent transactions.",
+  MY_ACCOUNT: "👤 <b>My Account</b>\n\n🆔 <b>User ID:</b> <code>{userId}</code>\n🗣 <b>Name:</b> {firstName} {username}\n💰 <b>Balance:</b> <code>₹{balance}</code>\n👥 <b>Referrals:</b> <code>{referrals}</code>\n📅 <b>Joined:</b> <code>{date}</code>",
+  REFER_INFO: "🎁 <b>Refer & Earn</b>\n\nInvite your friends and earn <code>₹{amount}</code> for every successful signup!\n\n🔗 <b>Your Referral Link:</b>\n{referralLink}",
+  SUPPORT: "📞 <b>Support</b>\n\nIf you need assistance, please contact our support team below.",
+  BANNED: "⛔ <b>User Banned</b>\n\nYou have been restricted from using the bot."
 };
 
 const BTN = { inline: (t, c) => ({text: t, callback_data: c}), url: (t, u) => ({text: t, url: u}) };
@@ -66,8 +65,14 @@ const KB = {
   manageUser: (uId, isBan) => ({ inline_keyboard: [[BTN.inline("➕ Add Balance", `admin_add_bal:${uId}`), BTN.inline("➖ Deduct Balance", `admin_ded_bal:${uId}`)], [BTN.inline(isBan ? "✅ Unban User" : "⛔ Ban User", `toggle_ban:${uId}`)]] })
 };
 
-function esc(text) { return text == null ? 'None' : text.toString().replace(/([`\\])/g, '\\$1'); }
-function escMd(text) { return text == null ? '' : text.toString().replace(/([_*\[\]()~`>#+\-=|{}.!])/g, '\\$1'); }
+// Safe HTML entity escaping ONLY (No markdown escaping required)
+function esc(text) { 
+  if (text == null) return 'None';
+  return text.toString()
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
 // ==========================================
 // 3. DATABASE HELPER FUNCTIONS
@@ -217,14 +222,11 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
 
     if (otpsReceived === 0) {
       await cancelSms(activationId);
-      
-      // DB Consistency: Cancel order, refund money, log transaction atomically
       await prisma.$transaction([
         prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }),
         prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } }),
         prisma.walletHistory.create({ data: { userId: userDbId, type: 'REFUND', amount: price, description: `Timeout refund: ${phone}` } })
       ]);
-
       await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND.replace('{amount}', price));
     } else {
       await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
@@ -275,7 +277,6 @@ async function handleUpdate(update) {
       const amount = Number(amountStr);
 
       if (!amountStr || isNaN(amount) || amount <= 0) {
-        server.log.error(`[PAYMENT ERROR] Missing or invalid amount in photo caption for user ${userId}`);
         await tg.sendMessage(chatId, MSG.PAYMENT_CAPTION_ERROR);
         return;
       }
@@ -295,7 +296,7 @@ async function handleUpdate(update) {
       const sys = await getSysSettings();
       const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
       if (aId) {
-        const caption = `💳 *New Payment Request*\n\n🆔 *User ID:* \`${userId}\`\n🧾 *Payment ID:* \`${p.id}\`\n💰 *Amount:* \`₹${amount}\``;
+        const caption = `💳 <b>New Payment Request</b>\n\n🆔 <b>User ID:</b> <code>${userId}</code>\n🧾 <b>Payment ID:</b> <code>${p.id}</code>\n💰 <b>Amount:</b> <code>₹${amount}</code>`;
         await tg.sendPhoto(aId, photoId, { caption, reply_markup: KB.approveReject(p.id, userId) });
       }
       return await tg.sendMessage(chatId, MSG.PAYMENT_SUBMITTED);
@@ -308,7 +309,6 @@ async function handleUpdate(update) {
     if (admin && msg.reply_to_message?.text) {
       const promptText = msg.reply_to_message.text;
 
-      // 1. Broadcast Message
       if (promptText.includes('Enter broadcast message:')) {
         const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
         let sent = 0;
@@ -322,7 +322,6 @@ async function handleUpdate(update) {
         return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`);
       }
 
-      // 2. User Lookup
       if (promptText.includes('Enter Telegram User ID to manage:')) {
         if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
         const targetTgId = BigInt(txt);
@@ -330,11 +329,10 @@ async function handleUpdate(update) {
         if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.');
         
         const isBan = await isBanned(targetTgId);
-        const info = `👤 *User Info*\n\n🆔 *ID:* \`${txt}\`\n💰 *Balance:* \`₹${esc(uTarget.balance)}\`\n👥 *Referrals:* \`${uTarget.totalReferrals}\`\n📅 *Joined:* \`${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}\``;
+        const info = `👤 <b>User Info</b>\n\n🆔 <b>ID:</b> <code>${txt}</code>\n💰 <b>Balance:</b> <code>₹${esc(uTarget.balance)}</code>\n👥 <b>Referrals:</b> <code>${uTarget.totalReferrals}</code>\n📅 <b>Joined:</b> <code>${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}</code>`;
         return await tg.sendMessage(chatId, info, KB.manageUser(txt, isBan));
       }
 
-      // 3. Add Balance
       if (promptText.includes('Enter amount to add to user:')) {
         const uIdMatch = promptText.match(/user:\s*(\d+)/);
         if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
@@ -350,12 +348,11 @@ async function handleUpdate(update) {
           prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_ADDED', amount: amt, description: `Admin added balance` } })
         ]);
         
-        await tg.sendMessage(chatId, `✅ Added \`₹${amt}\` to user \`${targetUId}\`.`);
-        await tg.sendMessage(targetUId, `💰 *Balance Added*\n\nAn admin has added \`₹${amt}\` to your wallet.`);
+        await tg.sendMessage(chatId, `✅ Added <code>₹${amt}</code> to user <code>${targetUId}</code>.`);
+        await tg.sendMessage(targetUId, `💰 <b>Balance Added</b>\n\nAn admin has added <code>₹${amt}</code> to your wallet.`);
         return;
       }
 
-      // 4. Deduct Balance
       if (promptText.includes('Enter amount to deduct from user:')) {
         const uIdMatch = promptText.match(/user:\s*(\d+)/);
         if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
@@ -371,11 +368,10 @@ async function handleUpdate(update) {
           prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_REMOVED', amount: -amt, description: `Admin deducted balance` } })
         ]);
         
-        await tg.sendMessage(chatId, `✅ Deducted \`₹${amt}\` from user \`${targetUId}\`.`);
+        await tg.sendMessage(chatId, `✅ Deducted <code>₹${amt}</code> from user <code>${targetUId}</code>.`);
         return;
       }
 
-      // 5. SMS Settings Edit
       if (promptText.includes('Enter new value for SMS setting:')) {
         const fieldMatch = promptText.match(/setting:\s*(\w+)/);
         if (!fieldMatch) return await tg.sendMessage(chatId, '❌ Failed to parse setting field.');
@@ -391,24 +387,20 @@ async function handleUpdate(update) {
 
         const newSet = { ...cur, [field]: val };
         await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
-        return await tg.sendMessage(chatId, `✅ SMS Setting \`${field}\` updated to \`${txt}\`.`);
+        return await tg.sendMessage(chatId, `✅ SMS Setting <code>${field}</code> updated to <code>${txt}</code>.`);
       }
     }
 
-    // Start Command
     if (txt.startsWith('/start')) {
       const payload = txt.split(' ')[1];
       if (payload) await processReferral(userId, payload);
-      const u = await getUser(userId);
       if (!(await verifyAccess(chatId, userId))) return;
       return await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
     }
 
     if (!(await verifyAccess(chatId, userId))) return;
 
-    // Regular & Admin Menu Buttons
     switch (txt) {
-      // --- USER COMMANDS ---
       case '🐦 Get Twitter Number':
         const uBuy = await getUser(userId);
         const act = await prisma.order.findFirst({ where: { userId: uBuy.id, status: 'ACTIVE' } });
@@ -419,33 +411,23 @@ async function handleUpdate(update) {
         
         const loadMsg = await tg.sendMessage(chatId, MSG.PURCHASING);
         const pr = await purchaseSms(smsSet);
-        if (!pr.success) return await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_FAILED);
+        if (!pr.success) return await tg.editMessage(chatId, loadMsg?.message_id, MSG.NUMBER_FAILED);
 
         try {
-          // DB Consistency: Strict atomic verification and order creation
           const ord = await prisma.$transaction(async (tx) => {
             const currentUser = await tx.user.findUnique({ where: { id: uBuy.id } });
-            if (currentUser.balance.toNumber() < smsSet.maxPrice) {
-              throw new Error('INSUFFICIENT_BALANCE');
-            }
-            const updatedUser = await tx.user.update({
-              where: { id: uBuy.id },
-              data: { balance: { decrement: smsSet.maxPrice } }
-            });
-            await tx.walletHistory.create({
-              data: { userId: updatedUser.id, type: 'NUMBER_PURCHASE', amount: -smsSet.maxPrice, description: `Purchased: ${pr.phoneNumber}` }
-            });
-            return await tx.order.create({
-              data: { userId: updatedUser.id, activationId: pr.activationId, phoneNumber: pr.phoneNumber, service: String(smsSet.serviceId), provider: 'API', price: smsSet.maxPrice, expiresAt: new Date(Date.now() + (smsSet.timeout * 1000)), status: 'ACTIVE' }
-            });
+            if (currentUser.balance.toNumber() < smsSet.maxPrice) throw new Error('INSUFFICIENT_BALANCE');
+            const updatedUser = await tx.user.update({ where: { id: uBuy.id }, data: { balance: { decrement: smsSet.maxPrice } } });
+            await tx.walletHistory.create({ data: { userId: updatedUser.id, type: 'NUMBER_PURCHASE', amount: -smsSet.maxPrice, description: `Purchased: ${pr.phoneNumber}` } });
+            return await tx.order.create({ data: { userId: updatedUser.id, activationId: pr.activationId, phoneNumber: pr.phoneNumber, service: String(smsSet.serviceId), provider: 'API', price: smsSet.maxPrice, expiresAt: new Date(Date.now() + (smsSet.timeout * 1000)), status: 'ACTIVE' } });
           });
 
-          await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_SUCCESS.replace('{phoneNumber}', pr.phoneNumber).replace('{amount}', smsSet.maxPrice), KB.cancel(pr.activationId));
-          startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg.message_id, smsSet.timeout, smsSet.interval);
+          await tg.editMessage(chatId, loadMsg?.message_id, MSG.NUMBER_SUCCESS.replace('{phoneNumber}', pr.phoneNumber).replace('{amount}', smsSet.maxPrice), KB.cancel(pr.activationId));
+          startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg?.message_id, smsSet.timeout, smsSet.interval);
         } catch (err) {
-          await cancelSms(pr.activationId); // Revert provider purchase if DB fails
-          if (err.message === 'INSUFFICIENT_BALANCE') return await tg.editMessage(chatId, loadMsg.message_id, MSG.NO_BALANCE);
-          return await tg.editMessage(chatId, loadMsg.message_id, MSG.NUMBER_FAILED);
+          await cancelSms(pr.activationId);
+          if (err.message === 'INSUFFICIENT_BALANCE') return await tg.editMessage(chatId, loadMsg?.message_id, MSG.NO_BALANCE);
+          return await tg.editMessage(chatId, loadMsg?.message_id, MSG.NUMBER_FAILED);
         }
         break;
 
@@ -459,8 +441,8 @@ async function handleUpdate(update) {
         const uHist = await getUser(userId);
         const txs = await prisma.walletHistory.findMany({ where: { userId: uHist.id }, take: 10, orderBy: { createdAt: 'desc' } });
         if (!txs.length) return await tg.sendMessage(chatId, MSG.WALLET_EMPTY);
-        let hTxt = "📜 *Wallet History*\n\n";
-        txs.forEach(t => hTxt += `📅 *${new Date(t.createdAt).toLocaleDateString('en-IN')}*\n🔹 *Type:* ${escMd(t.type)}\n💰 *Amount:* \`${t.amount>0?'+':''}${esc(t.amount)}\`\n📝 *Note:* _${escMd(t.description)}_\n\n`);
+        let hTxt = "📜 <b>Wallet History</b>\n\n";
+        txs.forEach(t => hTxt += `📅 <b>${new Date(t.createdAt).toLocaleDateString('en-IN')}</b>\n🔹 <b>Type:</b> ${esc(t.type)}\n💰 <b>Amount:</b> <code>${t.amount>0?'+':''}${esc(t.amount)}</code>\n📝 <b>Note:</b> <i>${esc(t.description)}</i>\n\n`);
         await tg.sendMessage(chatId, hTxt);
         break;
 
@@ -473,7 +455,7 @@ async function handleUpdate(update) {
         const uRef = await getUser(userId);
         const sysRef = await getSysSettings();
         const rLink = `https://t.me/${CONFIG.telegram.botUsername}?start=${userId}`;
-        const rTxt = MSG.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0)).replace('{referralLink}', esc(rLink)) + `\n\n📊 *Your Stats*\n👥 *Referrals:* \`${uRef.totalReferrals}\`\n💰 *Earnings:* \`₹${esc(uRef.referralEarnings)}\``;
+        const rTxt = MSG.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0)).replace('{referralLink}', esc(rLink)) + `\n\n📊 <b>Your Stats</b>\n👥 <b>Referrals:</b> <code>${uRef.totalReferrals}</code>\n💰 <b>Earnings:</b> <code>₹${esc(uRef.referralEarnings)}</code>`;
         await tg.sendMessage(chatId, rTxt);
         break;
 
@@ -482,14 +464,13 @@ async function handleUpdate(update) {
         await tg.sendMessage(chatId, MSG.SUPPORT, KB.support(sSup?.supportUsername || CONFIG.telegram.supportUsername));
         break;
 
-      // --- ADMIN COMMANDS ---
       case '📊 Statistics':
         if (!admin) return;
         const totU = await prisma.user.count();
         const actO = await prisma.order.count({ where: { status: 'ACTIVE' } });
         const cmpO = await prisma.order.count({ where: { status: 'COMPLETED' } });
         const rev = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'APPROVED' } });
-        const statMsg = `📊 *Bot Statistics*\n\n👥 *Total Users:* \`${totU}\`\n🔄 *Active Orders:* \`${actO}\`\n✅ *Completed Orders:* \`${cmpO}\`\n💰 *Total Revenue:* \`₹${rev._sum.amount || 0}\``;
+        const statMsg = `📊 <b>Bot Statistics</b>\n\n👥 <b>Total Users:</b> <code>${totU}</code>\n🔄 <b>Active Orders:</b> <code>${actO}</code>\n✅ <b>Completed Orders:</b> <code>${cmpO}</code>\n💰 <b>Total Revenue:</b> <code>₹${rev._sum.amount || 0}</code>`;
         await tg.sendMessage(chatId, statMsg);
         break;
 
@@ -502,8 +483,8 @@ async function handleUpdate(update) {
         if (!admin) return;
         const pends = await prisma.payment.findMany({ where: { status: 'PENDING' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
         if (!pends.length) return await tg.sendMessage(chatId, '💳 No pending payments.');
-        let pTxt = `💳 *Recent Pending Payments*\n\n`;
-        pends.forEach(p => pTxt += `🧾 *ID:* \`${p.id}\`\n👤 *User:* \`${p.user.telegramId}\`\n📅 *Date:* \`${new Date(p.createdAt).toLocaleDateString('en-IN')}\`\n💰 *Amount:* \`₹${esc(p.amount)}\`\n\n`);
+        let pTxt = `💳 <b>Recent Pending Payments</b>\n\n`;
+        pends.forEach(p => pTxt += `🧾 <b>ID:</b> <code>${p.id}</code>\n👤 <b>User:</b> <code>${p.user.telegramId}</code>\n📅 <b>Date:</b> <code>${new Date(p.createdAt).toLocaleDateString('en-IN')}</code>\n💰 <b>Amount:</b> <code>₹${esc(p.amount)}</code>\n\n`);
         await tg.sendMessage(chatId, pTxt);
         break;
 
@@ -511,8 +492,8 @@ async function handleUpdate(update) {
         if (!admin) return;
         const acts = await prisma.order.findMany({ where: { status: 'ACTIVE' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
         if (!acts.length) return await tg.sendMessage(chatId, '🛒 No active orders.');
-        let oTxt = `🛒 *Recent Active Orders*\n\n`;
-        acts.forEach(o => oTxt += `📱 *Number:* \`${o.phoneNumber}\`\n👤 *User:* \`${o.user.telegramId}\`\n🔑 *OTPs:* \`${o.otpCount}\`\n\n`);
+        let oTxt = `🛒 <b>Recent Active Orders</b>\n\n`;
+        acts.forEach(o => oTxt += `📱 <b>Number:</b> <code>${o.phoneNumber}</code>\n👤 <b>User:</b> <code>${o.user.telegramId}</code>\n🔑 <b>OTPs:</b> <code>${o.otpCount}</code>\n\n`);
         await tg.sendMessage(chatId, oTxt);
         break;
 
@@ -522,7 +503,7 @@ async function handleUpdate(update) {
         break;
 
       case '⚙️ Settings':
-        if (admin) await tg.sendMessage(chatId, "⚙️ *System Settings*", KB.adminSettings());
+        if (admin) await tg.sendMessage(chatId, "⚙️ <b>System Settings</b>", KB.adminSettings());
         break;
     }
   }
@@ -535,14 +516,13 @@ async function handleUpdate(update) {
     const userId = cb.from?.id;
     if (!chatId || !userId) return;
 
-    try { await tg.answerCallbackQuery(cb.id); } catch(e){}
+    await tg.answerCallbackQuery(cb.id);
     const dataParts = cb.data ? cb.data.split(':') : [];
     const action = dataParts[0];
     const args = dataParts.slice(1);
     const admin = await isAdmin(userId);
 
     switch (action) {
-      // User Actions
       case 'verify_join':
         if (await verifyAccess(chatId, userId)) {
           await tg.editMessage(chatId, msgId, MSG.VERIFIED_SUCCESS);
@@ -558,7 +538,6 @@ async function handleUpdate(update) {
         
         await cancelSms(args[0]);
 
-        // DB Consistency: Cancel order and refund atomically
         await prisma.$transaction([
           prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
           prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } }),
@@ -568,7 +547,6 @@ async function handleUpdate(update) {
         await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED);
         break;
 
-      // Admin Actions
       case 'approve_payment':
         if (!admin) return;
         const pId = args[0];
@@ -596,7 +574,7 @@ async function handleUpdate(update) {
         ]);
 
         await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
-        await tg.sendMessage(chatId, `✅ Payment \`${pId}\` processed. Added \`₹${amt}\` to User \`${args[1]}\`.`);
+        await tg.sendMessage(chatId, `✅ Payment <code>${pId}</code> processed. Added <code>₹${amt}</code> to User <code>${args[1]}</code>.`);
         await tg.sendMessage(targetTgId.toString(), MSG.PAYMENT_APPROVED.replace('{amount}', esc(amt)));
         break;
 
@@ -604,14 +582,14 @@ async function handleUpdate(update) {
         if (!admin) return;
         await prisma.payment.update({ where: { id: args[0] }, data: { status: 'REJECTED' } });
         await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
-        await tg.sendMessage(chatId, `❌ Payment \`${args[0]}\` Rejected.`);
+        await tg.sendMessage(chatId, `❌ Payment <code>${args[0]}</code> Rejected.`);
         await tg.sendMessage(args[1], MSG.PAYMENT_REJECTED);
         break;
 
       case 'admin_maintenance':
         if (!admin) return;
         const s = await getSysSettings();
-        await tg.editMessage(chatId, msgId, "🛠️ *Maintenance Mode*\n\nToggles user access.", KB.maintenance(s.isMaintenanceMode));
+        await tg.editMessage(chatId, msgId, "🛠️ <b>Maintenance Mode</b>\n\nToggles user access.", KB.maintenance(s.isMaintenanceMode));
         break;
 
       case 'toggle_maintenance':
@@ -619,18 +597,18 @@ async function handleUpdate(update) {
         const cur = await getSysSettings();
         const newVal = !cur.isMaintenanceMode;
         await prisma.setting.upsert({ where: { key: 'SYSTEM_SETTINGS' }, update: { value: JSON.stringify({...cur, isMaintenanceMode: newVal}) }, create: { key: 'SYSTEM_SETTINGS', value: JSON.stringify({isMaintenanceMode: newVal}) } });
-        await tg.editMessage(chatId, msgId, "🛠️ *Maintenance Mode*\n\nToggles user access.", KB.maintenance(newVal));
+        await tg.editMessage(chatId, msgId, "🛠️ <b>Maintenance Mode</b>\n\nToggles user access.", KB.maintenance(newVal));
         break;
         
       case 'admin_sms_settings':
         if (!admin) return;
-        await tg.editMessage(chatId, msgId, "📡 *SMS Settings*\n\nSelect a field to modify.", KB.smsSettings());
+        await tg.editMessage(chatId, msgId, "📡 <b>SMS Settings</b>\n\nSelect a field to modify.", KB.smsSettings());
         break;
 
       case 'admin_sms_current':
         if (!admin) return;
         const smsConf = await getSmsSettings();
-        await tg.sendMessage(chatId, `📄 *Current Config*\nCountry: \`${smsConf.countryId}\`\nOperator: \`${smsConf.operatorId}\`\nService: \`${smsConf.serviceId}\`\nPrice: \`₹${smsConf.maxPrice}\`\nTimeout: \`${smsConf.timeout}s\`\nInterval: \`${smsConf.interval}s\``);
+        await tg.sendMessage(chatId, `📄 <b>Current Config</b>\nCountry: <code>${smsConf.countryId}</code>\nOperator: <code>${smsConf.operatorId}</code>\nService: <code>${smsConf.serviceId}</code>\nPrice: <code>₹${smsConf.maxPrice}</code>\nTimeout: <code>${smsConf.timeout}s</code>\nInterval: <code>${smsConf.interval}s</code>`);
         break;
 
       case 'admin_sms_edit':
@@ -644,10 +622,10 @@ async function handleUpdate(update) {
         const isBan = await isBanned(targetBannedId);
         if (isBan) {
           await prisma.bannedUser.delete({ where: { telegramId: targetBannedId } });
-          await tg.sendMessage(chatId, `✅ User \`${args[0]}\` unbanned.`);
+          await tg.sendMessage(chatId, `✅ User <code>${args[0]}</code> unbanned.`);
         } else {
           await prisma.bannedUser.create({ data: { telegramId: targetBannedId } });
-          await tg.sendMessage(chatId, `⛔ User \`${args[0]}\` banned.`);
+          await tg.sendMessage(chatId, `⛔ User <code>${args[0]}</code> banned.`);
         }
         await tg.editMessageReplyMarkup(chatId, msgId, KB.manageUser(args[0], !isBan));
         break;
@@ -672,11 +650,12 @@ server.post('/webhook', async (req, reply) => {
 
   try {
     await handleUpdate(req.body);
-    return reply.code(200).send({ ok: true });
   } catch (error) {
-    server.log.error(error);
-    return reply.code(500).send({ error: "Webhook failed" });
+    server.log.error('[WEBHOOK ERROR]', error.message);
   }
+  
+  // ALWAYS return 200 to prevent Telegram from dropping the webhook
+  return reply.code(200).send({ ok: true });
 });
 
 // ==========================================
@@ -703,8 +682,8 @@ async function setupWebhookWithRetry(baseUrl, secret, maxRetries = 5) {
     try {
       server.log.info(`[TELEGRAM] Webhook Setup Attempt ${attempt}/${maxRetries}...`);
 
-      const info = await tg.apiRequest('getWebhookInfo');
-      if (info && info.ok && info.result.url === finalWebhookUrl) {
+      const info = await tg.getWebhookInfo();
+      if (info && info.url === finalWebhookUrl) {
         server.log.info(`[TELEGRAM] ✅ Webhook is already correctly configured at ${finalWebhookUrl}`);
         return true;
       }
@@ -715,8 +694,8 @@ async function setupWebhookWithRetry(baseUrl, secret, maxRetries = 5) {
       server.log.info(`[TELEGRAM] Registering new webhook: ${finalWebhookUrl}`);
       await tg.setWebhook(finalWebhookUrl, secret);
 
-      const verifyInfo = await tg.apiRequest('getWebhookInfo');
-      if (verifyInfo && verifyInfo.ok && verifyInfo.result.url === finalWebhookUrl) {
+      const verifyInfo = await tg.getWebhookInfo();
+      if (verifyInfo && verifyInfo.url === finalWebhookUrl) {
         server.log.info(`[TELEGRAM] ✅ Webhook successfully verified!`);
         return true;
       } else {
