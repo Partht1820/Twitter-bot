@@ -8,6 +8,7 @@ import * as tg from './telegram.js';
 // 1. GLOBAL INITIALIZATION & CONFIGURATION
 // ==========================================
 
+// Fix BigInt serialization crash for Fastify/JSON responses
 BigInt.prototype.toJSON = function () { return this.toString(); };
 
 const prisma = globalThis.prisma || new PrismaClient();
@@ -17,7 +18,7 @@ const server = Fastify({ logger: true, trustProxy: true });
 server.register(formbody);
 
 // ==========================================
-// 2. CONSTANTS: MESSAGES & KEYBOARDS (HTML)
+// 2. CONSTANTS: MESSAGES & KEYBOARDS
 // ==========================================
 
 const MSG = {
@@ -30,15 +31,14 @@ const MSG = {
   VERIFIED_SUCCESS: "✅ <b>Verification Successful</b>\n\nWelcome aboard! You now have full access to the bot.",
   VERIFIED_FAILED: "❌ <b>Verification Failed</b>\n\nWe couldn't verify your membership.",
   PURCHASING: "🔄 <b>Purchasing Number...</b>\n\nPlease wait while we reserve a number for you.",
-  NUMBER_SUCCESS: "✅ <b>Number Purchased successfully!</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n💰 <b>Price:</b> <code>₹{amount}</code>\n\n<i>Waiting for OTP...</i>",
+  NUMBER_SUCCESS: "✅ <b>Number Purchased Successfully</b>\n\n🌍 <b>Country:</b>\nUnited States 🇺🇸\n\n📱 <b>Service:</b>\nTwitter\n\n🆔 <b>Order ID:</b>\n<code>{orderId}</code>\n\n☎️ <b>Number:</b>\n<code>{phoneNumber}</code>\n\n💰 <b>Charged:</b>\n₹{amount}\n\n⏳ <b>Expires In:</b>\n{remainingTime}\n\n━━━━━━━━━━━━━━━━━━━━\nℹ️ Your number is now active.\n\n• Wait for your OTP(s).\n• If you no longer need this number, tap the \"Cancel Number\" button.\n\n💡 <b>Refund Policy</b>\n\n✅ 0 OTP Received → Full Refund\n\n❌ 1 or More OTPs Received → No Refund\n\n━━━━━━━━━━━━━━━━━━━━",
   NUMBER_FAILED: "❌ <b>Purchase Failed</b>\n\nWe couldn't acquire a number at this time. Please try again later.",
   NO_BALANCE: "⚠️ <b>Insufficient Balance</b>\n\nPlease add funds to your wallet to purchase this number.",
-  OTP_1: "📩 <b>OTP Received (1/3)</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n🔑 <b>OTP Code:</b> <code>{otp}</code>",
-  OTP_2: "📩 <b>OTP Received (2/3)</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n🔑 <b>OTP Code:</b> <code>{otp}</code>",
-  OTP_3: "📩 <b>Final OTP Received (3/3)</b>\n\n📱 <b>Number:</b> <code>{phoneNumber}</code>\n🔑 <b>OTP Code:</b> <code>{otp}</code>\n\n<i>Order completed automatically.</i>",
+  OTP_RECEIVED: "📩 <b>OTP #{count} Received</b>\n\n🔑 <b>OTP:</b>\n<code>{otp}</code>",
   OTP_TIMEOUT_REFUND: "⏱ <b>Timeout Reached</b>\n\nNo OTP was received in time. <code>₹{amount}</code> has been refunded to your wallet.",
   OTP_TIMEOUT_NO_REFUND: "⏱ <b>Timeout Reached</b>\n\nSession ended. No refund issued as OTPs were received.",
-  ORDER_CANCELLED: "🛑 <b>Number Cancelled</b>\n\nThe number was cancelled and your funds have been refunded.",
+  ORDER_CANCELLED_REFUND: "❌ <b>Number Cancelled Successfully</b>\n\n💰 Full refund has been credited to your wallet.",
+  ORDER_CANCELLED_NO_REFUND: "❌ <b>Number Cancelled Successfully</b>\n\n⚠️ At least one OTP was already received.\n\n💰 No refund has been issued.",
   PAYMENT_INSTRUCT: "━━━━━━━━━━━━━━━━━━━━\n💳 UPI ID:\n<code>{upi}</code>\n\n📷 After completing the payment, send the payment screenshot.\n\n📝 In the photo caption, write ONLY the payment amount.\n\nExample:\n100\n\n❌ Don't write:\nAmount: 100\nPaid 100\n100 INR\nPayment done\n\n✅ Write only:\n100\n━━━━━━━━━━━━━━━━━━━━",
   PAYMENT_CAPTION_ERROR: "❌ Please send the payment screenshot with only the amount in the caption. Example: 100",
   PAYMENT_SUBMITTED: "📤 <b>Payment Submitted</b>\n\nYour screenshot has been sent to the admin for review. Please wait for approval.",
@@ -56,7 +56,7 @@ const KB = {
   main: { keyboard: [[{text: "🐦 Get Twitter Number"}, {text: "👤 My Account"}], [{text: "📜 Wallet History"}, {text: "💳 Add Balance"}], [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}]], resize_keyboard: true, is_persistent: true },
   adminMain: { keyboard: [[{text: "🐦 Get Twitter Number"}, {text: "👤 My Account"}], [{text: "📜 Wallet History"}, {text: "💳 Add Balance"}], [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}], [{text: "📊 Statistics"}, {text: "👥 Users"}, {text: "💳 Payments"}], [{text: "🛒 Orders"}, {text: "📢 Broadcast"}, {text: "⚙️ Settings"}]], resize_keyboard: true, is_persistent: true },
   forceJoin: (c, g) => ({ inline_keyboard: [[BTN.url("📢 Join Channel", `https://t.me/${c.replace("@","")}`)], [BTN.url("👥 Join Group", `https://t.me/${g.replace("@","")}`)], [BTN.inline("✅ Verify", "verify_join")]] }),
-  cancel: (id) => ({ inline_keyboard: [[BTN.inline("🛑 Cancel Number", `cancel_order:${id}`)]] }),
+  cancel: (id) => ({ inline_keyboard: [[BTN.inline("🔴 Cancel Number", `cancel_order:${id}`)]] }),
   approveReject: (pId, uId) => ({ inline_keyboard: [[BTN.inline("✅ Approve", `approve_payment:${pId}:${uId}`), BTN.inline("❌ Reject", `reject_payment:${pId}:${uId}`)]] }),
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
   adminSettings: () => ({ inline_keyboard: [[BTN.inline("🛠️ Maintenance Mode", "admin_maintenance"), BTN.inline("📡 SMS Settings", "admin_sms_settings")]] }),
@@ -65,7 +65,7 @@ const KB = {
   manageUser: (uId, isBan) => ({ inline_keyboard: [[BTN.inline("➕ Add Balance", `admin_add_bal:${uId}`), BTN.inline("➖ Deduct Balance", `admin_ded_bal:${uId}`)], [BTN.inline(isBan ? "✅ Unban User" : "⛔ Ban User", `toggle_ban:${uId}`)]] })
 };
 
-// Safe HTML entity escaping ONLY (No markdown escaping required)
+// Safe HTML entity escaping ONLY
 function esc(text) { 
   if (text == null) return 'None';
   return text.toString()
@@ -207,12 +207,12 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
         otpsReceived++;
         await prisma.order.update({ where: { id: orderId }, data: { otpCount: otpsReceived } });
 
-        if (otpsReceived === 1) await tg.sendMessage(chatId, MSG.OTP_1.replace('{phoneNumber}', phone).replace('{otp}', esc(lastOtp)));
-        else if (otpsReceived === 2) await tg.sendMessage(chatId, MSG.OTP_2.replace('{phoneNumber}', phone).replace('{otp}', esc(lastOtp)));
-        else if (otpsReceived >= 3) {
-          await tg.sendMessage(chatId, MSG.OTP_3.replace('{phoneNumber}', phone).replace('{otp}', esc(lastOtp)));
+        await tg.sendMessage(chatId, MSG.OTP_RECEIVED.replace('{count}', otpsReceived).replace('{otp}', esc(lastOtp)));
+
+        if (otpsReceived >= 3) {
           await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
-          return await tg.editMessage(chatId, msgId, MSG.NUMBER_SUCCESS.replace('{phoneNumber}', phone).replace('{amount}', price));
+          await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
+          return;
         }
       }
     }
@@ -222,15 +222,16 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
 
     if (otpsReceived === 0) {
       await cancelSms(activationId);
+      
       await prisma.$transaction([
         prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }),
-        prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } }),
-        prisma.walletHistory.create({ data: { userId: userDbId, type: 'REFUND', amount: price, description: `Timeout refund: ${phone}` } })
+        prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } })
       ]);
-      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND.replace('{amount}', price));
+
+      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND.replace('{amount}', price), { inline_keyboard: [] });
     } else {
       await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
-      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND);
+      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] });
     }
   } catch (error) { console.error(`[POLLING ERR] Order: ${orderId}`, error); }
 }
@@ -277,6 +278,7 @@ async function handleUpdate(update) {
       const amount = Number(amountStr);
 
       if (!amountStr || isNaN(amount) || amount <= 0) {
+        server.log.error(`[PAYMENT ERROR] Missing or invalid amount in photo caption for user ${userId}`);
         await tg.sendMessage(chatId, MSG.PAYMENT_CAPTION_ERROR);
         return;
       }
@@ -394,6 +396,7 @@ async function handleUpdate(update) {
     if (txt.startsWith('/start')) {
       const payload = txt.split(' ')[1];
       if (payload) await processReferral(userId, payload);
+      const u = await getUser(userId);
       if (!(await verifyAccess(chatId, userId))) return;
       return await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
     }
@@ -417,12 +420,37 @@ async function handleUpdate(update) {
           const ord = await prisma.$transaction(async (tx) => {
             const currentUser = await tx.user.findUnique({ where: { id: uBuy.id } });
             if (currentUser.balance.toNumber() < smsSet.maxPrice) throw new Error('INSUFFICIENT_BALANCE');
-            const updatedUser = await tx.user.update({ where: { id: uBuy.id }, data: { balance: { decrement: smsSet.maxPrice } } });
-            await tx.walletHistory.create({ data: { userId: updatedUser.id, type: 'NUMBER_PURCHASE', amount: -smsSet.maxPrice, description: `Purchased: ${pr.phoneNumber}` } });
-            return await tx.order.create({ data: { userId: updatedUser.id, activationId: pr.activationId, phoneNumber: pr.phoneNumber, service: String(smsSet.serviceId), provider: 'API', price: smsSet.maxPrice, expiresAt: new Date(Date.now() + (smsSet.timeout * 1000)), status: 'ACTIVE' } });
+            
+            const updatedUser = await tx.user.update({
+              where: { id: uBuy.id },
+              data: { balance: { decrement: smsSet.maxPrice } }
+            });
+            
+            return await tx.order.create({
+              data: {
+                userId: updatedUser.id,
+                activationId: pr.activationId,
+                phoneNumber: pr.phoneNumber,
+                service: String(smsSet.serviceId),
+                provider: 'API',
+                price: smsSet.maxPrice,
+                expiresAt: new Date(Date.now() + (smsSet.timeout * 1000)),
+                status: 'ACTIVE'
+              }
+            });
           });
 
-          await tg.editMessage(chatId, loadMsg?.message_id, MSG.NUMBER_SUCCESS.replace('{phoneNumber}', pr.phoneNumber).replace('{amount}', smsSet.maxPrice), KB.cancel(pr.activationId));
+          const m = Math.floor(smsSet.timeout / 60);
+          const s = smsSet.timeout % 60;
+          const remainingTime = `${m}m ${s}s`;
+
+          const successMsg = MSG.NUMBER_SUCCESS
+            .replace('{orderId}', ord.id)
+            .replace('{phoneNumber}', pr.phoneNumber)
+            .replace('{amount}', smsSet.maxPrice)
+            .replace('{remainingTime}', remainingTime);
+
+          await tg.editMessage(chatId, loadMsg?.message_id, successMsg, KB.cancel(pr.activationId));
           startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg?.message_id, smsSet.timeout, smsSet.interval);
         } catch (err) {
           await cancelSms(pr.activationId);
@@ -516,7 +544,7 @@ async function handleUpdate(update) {
     const userId = cb.from?.id;
     if (!chatId || !userId) return;
 
-    await tg.answerCallbackQuery(cb.id);
+    try { await tg.answerCallbackQuery(cb.id); } catch(e){}
     const dataParts = cb.data ? cb.data.split(':') : [];
     const action = dataParts[0];
     const args = dataParts.slice(1);
@@ -533,18 +561,20 @@ async function handleUpdate(update) {
       case 'cancel_order':
         const uCan = await getUser(userId);
         const oCan = await prisma.order.findFirst({ where: { userId: uCan.id, status: 'ACTIVE', activationId: args[0] } });
-        if (!oCan) return await tg.editMessage(chatId, msgId, MSG.UNKNOWN_ERROR);
-        if (oCan.otpCount > 0) return await tg.sendMessage(chatId, MSG.PLEASE_WAIT);
+        if (!oCan) return await tg.editMessage(chatId, msgId, MSG.UNKNOWN_ERROR, { inline_keyboard: [] });
         
         await cancelSms(args[0]);
 
-        await prisma.$transaction([
-          prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
-          prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } }),
-          prisma.walletHistory.create({ data: { userId: uCan.id, type: 'REFUND', amount: oCan.price, description: `Manual refund: ${oCan.phoneNumber}` } })
-        ]);
-        
-        await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED);
+        if (oCan.otpCount === 0) {
+          await prisma.$transaction([
+            prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
+            prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } })
+          ]);
+          await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED_REFUND, { inline_keyboard: [] });
+        } else {
+          await prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } });
+          await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED_NO_REFUND, { inline_keyboard: [] });
+        }
         break;
 
       case 'approve_payment':
