@@ -81,28 +81,44 @@ export async function apiRequest(method, payload = {}) {
 
 /**
  * Sends a text message to a chat.
+ * Intelligently handles the 3rd argument being either a keyboard or generic options.
  */
-export async function sendMessage(chatId, text, options = {}) {
-  return apiRequest('sendMessage', {
+export async function sendMessage(chatId, text, optionsOrMarkup = {}) {
+  const payload = {
     chat_id: chatId,
     text,
     parse_mode: 'MarkdownV2',
-    disable_web_page_preview: true,
-    ...options
-  });
+    disable_web_page_preview: true
+  };
+
+  if (optionsOrMarkup.inline_keyboard || optionsOrMarkup.keyboard || optionsOrMarkup.force_reply || optionsOrMarkup.remove_keyboard) {
+    payload.reply_markup = optionsOrMarkup;
+  } else {
+    Object.assign(payload, optionsOrMarkup);
+  }
+
+  return apiRequest('sendMessage', payload);
 }
 
 /**
  * Edits an existing text message.
+ * Intelligently handles the 4th argument being either a keyboard or generic options.
  */
-export async function editMessage(chatId, messageId, text, options = {}) {
-  return apiRequest('editMessageText', {
+export async function editMessage(chatId, messageId, text, optionsOrMarkup = {}) {
+  const payload = {
     chat_id: chatId,
     message_id: messageId,
     text,
-    parse_mode: 'MarkdownV2',
-    ...options
-  });
+    parse_mode: 'MarkdownV2'
+  };
+
+  if (optionsOrMarkup.inline_keyboard || optionsOrMarkup.keyboard || optionsOrMarkup.force_reply || optionsOrMarkup.remove_keyboard) {
+    payload.reply_markup = optionsOrMarkup;
+  } else {
+    Object.assign(payload, optionsOrMarkup);
+  }
+
+  return apiRequest('editMessageText', payload);
 }
 
 export async function editMessageReplyMarkup(chatId, messageId, replyMarkup) {
@@ -136,25 +152,39 @@ export async function answerCallbackQuery(callbackQueryId, options = {}) {
 /**
  * Sends a photo to a chat.
  */
-export async function sendPhoto(chatId, photo, options = {}) {
-  return apiRequest('sendPhoto', {
+export async function sendPhoto(chatId, photo, optionsOrMarkup = {}) {
+  const payload = {
     chat_id: chatId,
     photo,
-    parse_mode: 'MarkdownV2',
-    ...options
-  });
+    parse_mode: 'MarkdownV2'
+  };
+
+  if (optionsOrMarkup.inline_keyboard || optionsOrMarkup.keyboard || optionsOrMarkup.force_reply || optionsOrMarkup.remove_keyboard) {
+    payload.reply_markup = optionsOrMarkup;
+  } else {
+    Object.assign(payload, optionsOrMarkup);
+  }
+
+  return apiRequest('sendPhoto', payload);
 }
 
 /**
  * Sends a document to a chat.
  */
-export async function sendDocument(chatId, document, options = {}) {
-  return apiRequest('sendDocument', {
+export async function sendDocument(chatId, document, optionsOrMarkup = {}) {
+  const payload = {
     chat_id: chatId,
     document,
-    parse_mode: 'MarkdownV2',
-    ...options
-  });
+    parse_mode: 'MarkdownV2'
+  };
+
+  if (optionsOrMarkup.inline_keyboard || optionsOrMarkup.keyboard || optionsOrMarkup.force_reply || optionsOrMarkup.remove_keyboard) {
+    payload.reply_markup = optionsOrMarkup;
+  } else {
+    Object.assign(payload, optionsOrMarkup);
+  }
+
+  return apiRequest('sendDocument', payload);
 }
 
 /**
