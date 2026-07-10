@@ -34,7 +34,7 @@ const MSG = {
   VERIFIED_SUCCESS: "✅ <b>Verification Successful</b>\n\nWelcome aboard! You now have full access to the bot.",
   VERIFIED_FAILED: "❌ <b>Verification Failed</b>\n\nWe couldn't verify your membership.",
   PURCHASING: "🔄 <b>Purchasing Number...</b>\n\nPlease wait while we reserve a number for you.",
-  NUMBER_SUCCESS: "✅ <b>Number Activated</b>\n\n🇺🇸 United States • 🐦 Twitter\n\n📞 +1 {phoneNumber}\n\n💳 ₹{amount}\n\n💡 <b>Refund Policy</b>\n• 0 OTP → Full Refund\n• 1+ OTP → No Refund",
+  NUMBER_SUCCESS: "✅ <b>Number Activated</b>\n\n🇺🇸 United States • 🐦 Twitter\n\n📞 <code>+{phoneNumber}</code>\n\n💳 ₹{amount}\n\n💡 <b>Refund Policy</b>\n• 0 OTP → Full Refund\n• 1+ OTP → No Refund",
   NUMBER_FAILED: "❌ <b>Purchase Failed</b>\n\nWe couldn't acquire a number at this time. Please try again later.",
   NO_BALANCE: "⚠️ <b>Insufficient Balance</b>\n\nPlease add funds to your wallet to purchase this number.",
   OTP_RECEIVED: "📩 <b>OTP #{count} Received</b>\n\n🔑 <b>OTP:</b>\n<code>{otp}</code>",
@@ -228,6 +228,7 @@ async function cancelSms(activationId) {
 // ==========================================
 
 async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, price, msgId, interval) {
+  // IMPLEMENTATION: Auto-expiry set to exactly 15 minutes
   const timeoutInMinutes = 15;
   const endTime = Date.now() + (timeoutInMinutes * 60 * 1000);
   let otpsReceived = 0;
@@ -257,6 +258,7 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
       }
     }
 
+    // Auto-expiry Logic: Triggered here if loop exits due to time
     const fOrder = await prisma.order.findUnique({ where: { id: orderId } });
     if (!fOrder || fOrder.status !== 'ACTIVE') return;
 
@@ -264,14 +266,14 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
       await cancelSms(activationId);
       
       await prisma.$transaction([
-        prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }), // Mapped to CANCELLED for Refund policy
+        prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }),
         prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } }),
         prisma.walletHistory.create({ data: { userId: userDbId, type: 'REFUND', amount: price, description: `Timeout refund: ${phone}` } })
       ]);
 
-      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND, { inline_keyboard: [] });
+      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND.replace('{amount}', price), { inline_keyboard: [] });
     } else {
-      await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } }); // Mapped to COMPLETED for non-refunds
+      await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
       await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] });
     }
   } catch (error) { console.error(`[POLLING ERR] Order: ${orderId}`, error); }
@@ -450,14 +452,14 @@ async function handleUpdate(update) {
             const currentUser = await tx.user.findUnique({ where: { id: uBuy.id } });
             if (currentUser.balance.toNumber() < smsSet.maxPrice) throw new Error('INSUFFICIENT_BALANCE');
             
-            const updatedUser = await tx.user.update({
+            await tx.user.update({
               where: { id: uBuy.id },
               data: { balance: { decrement: smsSet.maxPrice } }
             });
             
             return await tx.order.create({
               data: {
-                userId: updatedUser.id,
+                userId: uBuy.id,
                 activationId: pr.activationId,
                 phoneNumber: pr.phoneNumber,
                 service: String(smsSet.serviceId),
@@ -495,7 +497,7 @@ async function handleUpdate(update) {
         const txs = await prisma.walletHistory.findMany({ 
           where: { 
             userId: uHist.id,
-            type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS'] } 
+            type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS', 'REFUND', 'ADMIN_REMOVED'] } 
           }, 
           take: 10, 
           orderBy: { createdAt: 'desc' } 
