@@ -1,13 +1,19 @@
 import prisma from '../database.js';
 
+const SYSTEM_SETTINGS_KEY = 'SYSTEM_SETTINGS';
+const SMS_SETTINGS_KEY = 'SMS_SETTINGS';
+
 /**
  * Retrieves the global system settings.
  * @returns {Promise<Object|null>} The system settings object.
  */
 export async function getSystemSettings() {
   try {
-    // Assuming a single configuration row exists; findFirst retrieves it.
-    return await prisma.systemSettings.findFirst();
+    const setting = await prisma.setting.findUnique({
+      where: { key: SYSTEM_SETTINGS_KEY }
+    });
+    
+    return setting ? JSON.parse(setting.value) : null;
   } catch (error) {
     console.error(`[DB ERROR] getSystemSettings:`, error);
     throw error;
@@ -17,24 +23,31 @@ export async function getSystemSettings() {
 /**
  * Updates the global system settings.
  * If no settings exist yet, it creates the initial configuration.
+ * Merges new data with existing data.
  * @param {Object} data - The settings fields to update.
  * @returns {Promise<Object>} The updated system settings object.
  */
 export async function updateSystemSettings(data) {
   try {
-    const settings = await prisma.systemSettings.findFirst();
-
-    if (settings) {
-      return await prisma.systemSettings.update({
-        where: { id: settings.id },
-        data
-      });
-    }
-
-    // Fallback: Create initial settings if the table is empty
-    return await prisma.systemSettings.create({
-      data
+    const existingSetting = await prisma.setting.findUnique({
+      where: { key: SYSTEM_SETTINGS_KEY }
     });
+
+    const currentSettings = existingSetting ? JSON.parse(existingSetting.value) : {};
+    const updatedSettings = { ...currentSettings, ...data };
+
+    const setting = await prisma.setting.upsert({
+      where: { key: SYSTEM_SETTINGS_KEY },
+      update: {
+        value: JSON.stringify(updatedSettings)
+      },
+      create: {
+        key: SYSTEM_SETTINGS_KEY,
+        value: JSON.stringify(updatedSettings)
+      }
+    });
+
+    return JSON.parse(setting.value);
   } catch (error) {
     console.error(`[DB ERROR] updateSystemSettings:`, error);
     throw error;
@@ -49,22 +62,31 @@ export async function updateSystemSettings(data) {
  */
 export async function getSmsSettings() {
   try {
-    let settings = await prisma.smsSettings.findFirst();
+    const setting = await prisma.setting.findUnique({
+      where: { key: SMS_SETTINGS_KEY }
+    });
 
-    if (!settings) {
-      settings = await prisma.smsSettings.create({
+    if (!setting) {
+      const defaultSettings = {
+        countryId: "",
+        operatorId: "",
+        serviceId: "",
+        maxPrice: 0,
+        timeout: 300,
+        interval: 10
+      };
+
+      const newSetting = await prisma.setting.create({
         data: {
-          countryId: "",
-          operatorId: "",
-          serviceId: "",
-          maxPrice: 0,
-          timeout: 300,
-          interval: 10
+          key: SMS_SETTINGS_KEY,
+          value: JSON.stringify(defaultSettings)
         }
       });
+
+      return JSON.parse(newSetting.value);
     }
 
-    return settings;
+    return JSON.parse(setting.value);
   } catch (error) {
     console.error(`[DB ERROR] getSmsSettings:`, error);
     throw error;
