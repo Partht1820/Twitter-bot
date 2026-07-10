@@ -112,7 +112,7 @@ model Referral {
 model Payment {
   id            String        @id @default(cuid())
   userId        String
-  amount        Decimal       @db.Decimal(10, 2)
+  amount        Decimal?      @db.Decimal(10, 2)
   photoFileId String
   status        PaymentStatus @default(PENDING)
   transactionId String?
