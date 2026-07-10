@@ -12,7 +12,18 @@ import { handleAddBalance, handleWalletHistory, handlePaymentScreenshot } from '
 import { handleReferral } from './controllers/referral.controller.js';
 import { handleSupport } from './controllers/support.controller.js';
 import { handleApprovePayment, handleRejectPayment, handlePaymentAmountReply } from './controllers/payment.controller.js';
-import { handleAdminMaintenance, handleAdminSmsSettings, handleAdminSmsCurrent, handleAdminSmsEdit } from './controllers/admin.controller.js';
+import { 
+  handleAdminMaintenance, 
+  handleAdminSmsSettings, 
+  handleAdminSmsCurrent, 
+  handleAdminSmsEdit,
+  handleAdminStatistics,
+  handleAdminUsers,
+  handleAdminPayments,
+  handleAdminOrders,
+  handleAdminBroadcast,
+  handleAdminSettings
+} from './controllers/admin.controller.js';
 
 const server = Fastify({
   logger: true,
@@ -112,6 +123,20 @@ server.post('/webhook', async (request, reply) => {
           await handleReferral(chatId, userId);
         } else if (text === '📞 Support') {
           await handleSupport(chatId, userId);
+        } 
+        // Admin Menu Commands
+        else if (text === '📊 Statistics') {
+          await handleAdminStatistics(chatId, userId);
+        } else if (text === '👥 Users') {
+          await handleAdminUsers(chatId, userId);
+        } else if (text === '💳 Payments') {
+          await handleAdminPayments(chatId, userId);
+        } else if (text === '🛒 Orders') {
+          await handleAdminOrders(chatId, userId);
+        } else if (text === '📢 Broadcast') {
+          await handleAdminBroadcast(chatId, userId);
+        } else if (text === '⚙️ Settings') {
+          await handleAdminSettings(chatId, userId);
         } else {
           await sendMessage(chatId, '❌ Unknown command.');
         }
@@ -138,11 +163,11 @@ server.post('/webhook', async (request, reply) => {
 
       if (data === 'verify_join') {
         await handleVerifyJoin(chatId, userId, messageId);
-      } else if (data.startsWith('cancel_order_')) {
-        const activationId = data.replace('cancel_order_', '');
+      } else if (data.startsWith('cancel_order:')) {
+        const activationId = data.replace('cancel_order:', '');
         await handleCancelOrder(chatId, userId, activationId, messageId);
-      } else if (data.startsWith('approve_payment_')) {
-        const match = data.match(/^approve_payment_(.+)_(\d+)$/);
+      } else if (data.startsWith('approve_payment:')) {
+        const match = data.match(/^approve_payment:(.+):(\d+)$/);
         if (match) {
           const paymentId = match[1];
           const paymentUserId = match[2];
@@ -158,8 +183,8 @@ server.post('/webhook', async (request, reply) => {
             throw error;
           }
         }
-      } else if (data.startsWith('reject_payment_')) {
-        const match = data.match(/^reject_payment_(.+)_(\d+)$/);
+      } else if (data.startsWith('reject_payment:')) {
+        const match = data.match(/^reject_payment:(.+):(\d+)$/);
         if (match) {
           const paymentId = match[1];
           const paymentUserId = match[2];
@@ -175,8 +200,8 @@ server.post('/webhook', async (request, reply) => {
         await handleAdminSmsSettings(chatId, userId, messageId);
       } else if (data === 'admin_sms_current') {
         await handleAdminSmsCurrent(chatId, userId, messageId);
-      } else if (data.startsWith('admin_sms_edit_')) {
-        const field = data.replace('admin_sms_edit_', '');
+      } else if (data.startsWith('admin_sms_edit:')) {
+        const field = data.replace('admin_sms_edit:', '');
         await handleAdminSmsEdit(chatId, userId, field, messageId);
       }
     }
