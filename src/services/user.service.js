@@ -140,16 +140,7 @@ export async function banUser(telegramId, reason = null) {
     throw error;
   }
 }
-  try {
-    return await prisma.user.update({
-      where: { telegramId },
-      data: { isBanned: true }
-    });
-  } catch (error) {
-    console.error(`[DB ERROR] banUser (Telegram ID: ${telegramId}):`, error);
-    throw error;
-  }
-}
+  
 
 /**
  * Unbans a user by setting isBanned to false.
@@ -166,16 +157,7 @@ export async function unbanUser(telegramId) {
     throw error;
   }
 }
-  try {
-    return await prisma.user.update({
-      where: { telegramId },
-      data: { isBanned: false }
-    });
-  } catch (error) {
-    console.error(`[DB ERROR] unbanUser (Telegram ID: ${telegramId}):`, error);
-    throw error;
-  }
-}
+  
 
 /**
  * Retrieves a paginated list of all users.
