@@ -42,6 +42,7 @@ async function removeAdminKeyboard(chatId, messageId) {
 
 /**
  * Handles the payment approval callback triggered by the admin.
+ * Sends a ForceReply prompt to ask for the deposit amount.
  * @param {number} chatId - The admin's chat ID.
  * @param {number} adminId - The user ID of the admin pressing the button.
  * @param {string|number} paymentId - The unique ID of the payment.
@@ -69,27 +70,77 @@ export async function handleApprovePayment(chatId, adminId, paymentId, paymentUs
       return await sendMessage(chatId, `⚠️ Payment \`${paymentId}\` has already been processed (Status: ${payment.status}).`);
     }
 
-    // 4. Validate Payment Amount (Ensure amount exists before approving)
-    const amount = Number(payment.amount);
+    // 4. Remove Admin Keyboard to prevent duplicate clicks
+    await removeAdminKeyboard(chatId, messageId);
+
+    // 5. Send Force Reply to prompt admin for the amount
+    const promptText = `💰 Enter deposit amount for this payment\\.`;
+
+    await sendMessage(chatId, promptText, {
+      reply_markup: {
+        force_reply: true,
+        selective: true,
+        input_field_placeholder: "Enter amount..."
+      }
+    });
+
+  } catch (error) {
+    console.error(`[APPROVE PAYMENT ERROR] Payment: ${paymentId} | Admin: ${adminId}`, error);
+    await sendMessage(chatId, MESSAGES.INTERNAL_ERROR);
+  }
+}
+
+/**
+ * Handles the admin's reply to the deposit amount prompt.
+ * @param {number} chatId - The admin's chat ID.
+ * @param {number} adminId - The user ID of the admin.
+ * @param {string|number} amountText - The text reply containing the deposit amount.
+ * @param {string|number} paymentId - The unique ID of the payment.
+ * @param {string|number} paymentUserId - The user ID of the person who submitted the payment.
+ */
+export async function handlePaymentAmountReply(chatId, adminId, amountText, paymentId, paymentUserId) {
+  try {
+    // 1. Verify Admin Authorization
+    const authorized = await isAdmin(adminId);
+    if (!authorized) {
+      return await sendMessage(chatId, "⛔ *Access Denied:* You are not authorized.");
+    }
+
+    // 2. Parse and Validate Amount
+    const amount = Number(amountText);
     if (isNaN(amount) || amount <= 0) {
-      return await sendMessage(chatId, `❌ *Error:* Payment \`${paymentId}\` does not have a valid amount set. Please update the amount in the database before approving.`);
+      return await sendMessage(chatId, `❌ *Invalid Amount:* Please enter a valid positive number for payment \`${paymentId}\`.`);
+    }
+
+    // 3. Fetch Payment Details
+    const payment = await getPaymentById(paymentId);
+    if (!payment) {
+      return await sendMessage(chatId, `❌ *Error:* Payment \`${paymentId}\` not found in database.`);
+    }
+
+    // 4. Prevent Duplicate Approval
+    if (payment.status !== 'PENDING') {
+      return await sendMessage(chatId, `⚠️ Payment \`${paymentId}\` has already been processed (Status: ${payment.status}).`);
     }
 
     // 5. Execute Approval Workflow
-    await updatePaymentStatus(paymentId, 'APPROVED');
+    // Assuming updatePaymentStatus can be extended to save amount, or the amount is naturally documented via wallet history
+    await updatePaymentStatus(paymentId, 'APPROVED'); 
+    
+    // (If your service supports passing the amount, you would adapt the above line to: await updatePaymentStatus(paymentId, 'APPROVED', amount); )
+
     await updateBalance(paymentUserId, amount);
     await addWalletTransaction(paymentUserId, 'DEPOSIT', amount, `Payment approved (ID: ${paymentId})`);
 
     // 6. Update Admin UI
-    await removeAdminKeyboard(chatId, messageId);
-    await sendMessage(chatId, `✅ *Payment Approved*\n\nAdded \`₹${amount}\` to User \`${paymentUserId}\`'s wallet.`);
+    await sendMessage(chatId, `✅ *Payment Approved*\n\nPayment \`${paymentId}\` processed.\nAdded \`₹${amount}\` to User \`${paymentUserId}\`'s wallet.`);
 
     // 7. Notify User
     const userMessage = MESSAGES.PAYMENT_APPROVED.replace('{amount}', escapeForCodeBlock(amount));
     await sendMessage(paymentUserId, userMessage);
 
   } catch (error) {
-    console.error(`[APPROVE PAYMENT ERROR] Payment: ${paymentId} | Admin: ${adminId}`, error);
+    console.error(`[PAYMENT REPLY ERROR] Payment: ${paymentId} | Admin: ${adminId}`, error);
     await sendMessage(chatId, MESSAGES.INTERNAL_ERROR);
   }
 }
