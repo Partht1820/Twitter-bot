@@ -41,9 +41,13 @@ export async function handleStart(chatId, telegramUser, text) {
   try {
     // 1. Check Maintenance Mode
     const settings = await getSystemSettings();
-    if (settings?.isMaintenanceMode) {
-      return await sendMessage(chatId, MESSAGES.MAINTENANCE_MODE);
-    }
+
+const adminId = settings?.adminChatId || CONFIG.telegram.adminId;
+const isAdmin = String(userId) === String(adminId);
+
+if (settings?.isMaintenanceMode && !isAdmin) {
+    return await sendMessage(chatId, MESSAGES.MAINTENANCE_MODE);
+}
 
     // 2 & 3. Fetch or Create User
     let user = await getUser(userId);
