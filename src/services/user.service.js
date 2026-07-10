@@ -98,6 +98,17 @@ export async function updateBalance(telegramId, amount) {
  */
 export async function isUserBanned(telegramId) {
   try {
+    const banned = await prisma.bannedUser.findUnique({
+      where: { telegramId }
+    });
+
+    return !!banned;
+  } catch (error) {
+    console.error(`[DB ERROR] isUserBanned (Telegram ID: ${telegramId}):`, error);
+    throw error;
+  }
+}
+  try {
     const user = await prisma.user.findUnique({
       where: { telegramId },
       select: { isBanned: true }
@@ -114,7 +125,21 @@ export async function isUserBanned(telegramId) {
  * @param {number|bigint} telegramId - The Telegram User ID.
  * @returns {Promise<Object>} The updated user.
  */
-export async function banUser(telegramId) {
+export async function banUser(telegramId, reason = null) {
+  try {
+    return await prisma.bannedUser.upsert({
+      where: { telegramId },
+      update: { reason },
+      create: {
+        telegramId,
+        reason
+      }
+    });
+  } catch (error) {
+    console.error(`[DB ERROR] banUser (Telegram ID: ${telegramId}):`, error);
+    throw error;
+  }
+}
   try {
     return await prisma.user.update({
       where: { telegramId },
@@ -132,6 +157,15 @@ export async function banUser(telegramId) {
  * @returns {Promise<Object>} The updated user.
  */
 export async function unbanUser(telegramId) {
+  try {
+    return await prisma.bannedUser.delete({
+      where: { telegramId }
+    }).catch(() => null);
+  } catch (error) {
+    console.error(`[DB ERROR] unbanUser (Telegram ID: ${telegramId}):`, error);
+    throw error;
+  }
+}
   try {
     return await prisma.user.update({
       where: { telegramId },
