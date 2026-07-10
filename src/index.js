@@ -17,9 +17,6 @@ if (process.env.NODE_ENV !== 'production') globalThis.prisma = prisma;
 const server = Fastify({ logger: true, trustProxy: true });
 server.register(formbody);
 
-// In-memory state for admin payment approvals via ForceReply
-const pendingPaymentApprovals = new Map();
-
 // ==========================================
 // 2. CONSTANTS: MESSAGES & KEYBOARDS
 // ==========================================
@@ -272,9 +269,28 @@ async function handleUpdate(update) {
     // Handle Photos (Payment Screenshots)
     if (msg.photo?.length > 0) {
       if (!(await verifyAccess(chatId, userId))) return;
+
+      // Extract and validate amount from caption
+      const amountStr = msg.caption ? msg.caption.trim() : '';
+      const amount = Number(amountStr);
+
+      if (!amountStr || isNaN(amount) || amount <= 0) {
+        server.log.error(`[PAYMENT ERROR] Missing or invalid amount in photo caption for user ${userId}`);
+        await tg.sendMessage(chatId, '❌ Please re-upload your screenshot and include the deposit amount in the photo caption (e.g., 500).');
+        return;
+      }
+
       const u = await getUser(userId);
       const photoId = msg.photo[msg.photo.length - 1].file_id;
-      const p = await prisma.payment.create({ data: { userId: u.id, photoFileId: photoId, status: 'PENDING' } });
+      
+      const p = await prisma.payment.create({ 
+        data: { 
+          userId: u.id, 
+          photoFileId: photoId, 
+          amount: amount,
+          status: 'PENDING' 
+        } 
+      });
       
       const sys = await getSysSettings();
       const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
