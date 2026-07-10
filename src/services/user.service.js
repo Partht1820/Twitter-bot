@@ -108,17 +108,6 @@ export async function isUserBanned(telegramId) {
     throw error;
   }
 }
-  try {
-    const user = await prisma.user.findUnique({
-      where: { telegramId },
-      select: { isBanned: true }
-    });
-    return user ? user.isBanned : false;
-  } catch (error) {
-    console.error(`[DB ERROR] isUserBanned (Telegram ID: ${telegramId}):`, error);
-    throw error;
-  }
-}
 
 /**
  * Bans a user by setting isBanned to true.
