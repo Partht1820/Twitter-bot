@@ -492,7 +492,14 @@ async function handleUpdate(update) {
 
       case '📜 Wallet History':
         const uHist = await getUser(userId);
-        const txs = await prisma.walletHistory.findMany({ where: { userId: uHist.id }, take: 10, orderBy: { createdAt: 'desc' } });
+        const txs = await prisma.walletHistory.findMany({ 
+          where: { 
+            userId: uHist.id,
+            type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS'] } 
+          }, 
+          take: 10, 
+          orderBy: { createdAt: 'desc' } 
+        });
         if (!txs.length) return await tg.sendMessage(chatId, MSG.WALLET_EMPTY);
         let hTxt = "📜 <b>Wallet History</b>\n\n";
         txs.forEach(t => hTxt += `📅 <b>${new Date(t.createdAt).toLocaleDateString('en-IN')}</b>\n🔹 <b>Type:</b> ${esc(t.type)}\n💰 <b>Amount:</b> <code>${t.amount>0?'+':''}${esc(t.amount)}</code>\n📝 <b>Note:</b> <i>${esc(t.description)}</i>\n\n`);
