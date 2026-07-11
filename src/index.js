@@ -66,8 +66,14 @@ const KB = {
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
   adminSettings: () => ({ inline_keyboard: [
     [BTN.inline("💰 Number Price", "admin_num_price"), BTN.inline("🎁 Referral Reward", "admin_ref_reward")],
+    [BTN.inline("🚫 Force Join Bypass", "admin_bypass")],
     [BTN.inline("🛠️ Maintenance Mode", "admin_maintenance"), BTN.inline("📡 SMS Settings", "admin_sms_settings")],
     [BTN.inline("🔙 Back", "back_to_admin")]
+  ] }),
+  bypassMenu: () => ({ inline_keyboard: [
+    [BTN.inline("➕ Add User", "add_bypass"), BTN.inline("📋 View Users", "view_bypass")],
+    [BTN.inline("❌ Remove User", "remove_bypass")],
+    [BTN.inline("🔙 Back", "admin_settings")]
   ] }),
   maintenance: (isOn) => ({ inline_keyboard: [[BTN.inline(isOn ? "✅ Turn OFF" : "⛔ Turn ON", "toggle_maintenance")], [BTN.inline("🔙 Back", "admin_settings")]] }),
   smsSettings: () => ({ inline_keyboard: [[BTN.inline("🌍 Country", "admin_sms_edit:countryId"), BTN.inline("📡 Operator", "admin_sms_edit:operatorId")], [BTN.inline("🐦 Service", "admin_sms_edit:serviceId"), BTN.inline("💰 Max Price", "admin_sms_edit:maxPrice")], [BTN.inline("⏱ Timeout", "admin_sms_edit:timeout"), BTN.inline("🔄 Interval", "admin_sms_edit:interval")], [BTN.inline("📄 Current Config", "admin_sms_current")], [BTN.inline("🔙 Back", "admin_settings")]] }),
@@ -102,6 +108,24 @@ async function getSmsSettings() {
   return JSON.parse(n.value);
 }
 
+async function getBypassUsers() {
+  const s = await prisma.setting.findUnique({ where: { key: 'FORCE_JOIN_BYPASS' } });
+  return s ? JSON.parse(s.value) : [];
+}
+
+async function updateBypassUsers(list) {
+  await prisma.setting.upsert({
+    where: { key: 'FORCE_JOIN_BYPASS' },
+    update: { value: JSON.stringify(list) },
+    create: { key: 'FORCE_JOIN_BYPASS', value: JSON.stringify(list) }
+  });
+}
+
+async function isBypassed(tgId) {
+  const list = await getBypassUsers();
+  return list.includes(String(tgId));
+}
+
 async function getUser(tgId) {
   let user = await prisma.user.findUnique({ where: { telegramId: BigInt(tgId) } });
   if (!user) user = await prisma.user.create({ data: { telegramId: BigInt(tgId) } });
@@ -120,6 +144,8 @@ async function isBanned(tgId) {
 
 async function checkForceJoin(userId) {
   if (await isAdmin(userId)) return true;
+  if (await isBypassed(userId)) return true;
+  
   const sys = await getSysSettings();
   
   if (sys?.forceJoinEnabled === false) return true;
@@ -448,6 +474,28 @@ async function handleUpdate(update) {
         await prisma.setting.upsert({ where: { key: 'SYSTEM_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SYSTEM_SETTINGS', value: JSON.stringify(newSet) } });
         return await tg.sendMessage(chatId, `✅ <b>Referral Reward</b> updated to <code>₹${amt}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
       }
+      
+      if (promptText.includes('Send the Telegram User ID to bypass Force Join:')) {
+        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+        const list = await getBypassUsers();
+        if (!list.includes(txt)) {
+          list.push(txt);
+          await updateBypassUsers(list);
+        }
+        return await tg.sendMessage(chatId, `✅ <b>User added successfully.</b>\n\nThis user can now use the bot without joining the Channel or Group.`, { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+      }
+
+      if (promptText.includes('Send the Telegram User ID to remove from bypass:')) {
+        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+        let list = await getBypassUsers();
+        if (list.includes(txt)) {
+          list = list.filter(id => id !== txt);
+          await updateBypassUsers(list);
+          return await tg.sendMessage(chatId, `✅ <b>User removed successfully.</b>\n\nForce Join will now apply to this user again.`, { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+        } else {
+          return await tg.sendMessage(chatId, '⚠️ User is not in the bypass list.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+        }
+      }
     }
 
     if (txt.startsWith('/start')) {
@@ -703,6 +751,36 @@ async function handleUpdate(update) {
       case 'admin_settings':
         if (!admin) return;
         await tg.editMessage(chatId, msgId, "⚙️ <b>System Settings</b>", KB.adminSettings());
+        break;
+        
+      case 'admin_bypass':
+        if (!admin) return;
+        const bUsers = await getBypassUsers();
+        await tg.editMessage(chatId, msgId, `🚫 <b>Force Join Bypass</b>\n\nCurrent Bypass Users: <code>${bUsers.length}</code>`, KB.bypassMenu());
+        break;
+
+      case 'add_bypass':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '🚫 Send the Telegram User ID to bypass Force Join:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'remove_bypass':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '🚫 Send the Telegram User ID to remove from bypass:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'view_bypass':
+        if (!admin) return;
+        const list = await getBypassUsers();
+        if (list.length === 0) {
+          await tg.editMessage(chatId, msgId, "🚫 <b>Force Join Bypass List</b>\n\nNo users bypassed.", KB.bypassMenu());
+        } else {
+          let msg = "🚫 <b>Force Join Bypass List</b>\n\n";
+          list.forEach(id => msg += `• <code>${id}</code>\n`);
+          await tg.editMessage(chatId, msgId, msg, KB.bypassMenu());
+        }
         break;
 
       case 'admin_maintenance':
