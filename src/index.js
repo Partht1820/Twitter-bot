@@ -51,7 +51,9 @@ const MSG = {
   MY_ACCOUNT: "👤 <b>My Account</b>\n\n🆔 <b>User ID:</b> <code>{userId}</code>\n🗣 <b>Name:</b> {firstName} {username}\n💰 <b>Balance:</b> <code>₹{balance}</code>\n👥 <b>Referrals:</b> <code>{referrals}</code>\n📅 <b>Joined:</b> <code>{date}</code>",
   REFER_INFO: "🎁 <b>Refer & Earn</b>\n\nInvite your friends and earn <code>₹{amount}</code> for every successful signup!\n\n🔗 <b>Your Referral Link:</b>\n{referralLink}",
   SUPPORT: "📞 <b>Support</b>\n\nIf you need assistance, please contact our support team below.",
-  BANNED: "⛔ <b>User Banned</b>\n\nYou have been restricted from using the bot."
+  BANNED: "⛔ <b>User Banned</b>\n\nYou have been restricted from using the bot.",
+  REF_PENDING: "👥 <b>New Referral Joined</b>\n\nA new user has joined using your referral link.\n\n⏳ <b>Status:</b> Pending Verification\n\nThe referral reward will be credited after the user successfully completes Channel & Group verification.",
+  REF_COMPLETED: "🎉 <b>Referral Completed</b>\n\nYour referral has been successfully verified.\n\n💰 <b>Reward Added:</b>\n₹{referralReward}\n\nThe reward has been added to your wallet."
 };
 
 const BTN = { inline: (t, c) => ({text: t, callback_data: c}), url: (t, u) => ({text: t, url: u}) };
@@ -62,10 +64,16 @@ const KB = {
   cancel: (id) => ({ inline_keyboard: [[BTN.inline("❌ Cancel Number", `cancel_order:${id}`)]] }),
   approveReject: (pId, uId) => ({ inline_keyboard: [[BTN.inline("✅ Approve", `approve_payment:${pId}:${uId}`), BTN.inline("❌ Reject", `reject_payment:${pId}:${uId}`)]] }),
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
-  adminSettings: () => ({ inline_keyboard: [[BTN.inline("🛠️ Maintenance Mode", "admin_maintenance"), BTN.inline("📡 SMS Settings", "admin_sms_settings")]] }),
+  adminSettings: () => ({ inline_keyboard: [
+    [BTN.inline("💰 Number Price", "admin_num_price"), BTN.inline("🎁 Referral Reward", "admin_ref_reward")],
+    [BTN.inline("🛠️ Maintenance Mode", "admin_maintenance"), BTN.inline("📡 SMS Settings", "admin_sms_settings")],
+    [BTN.inline("🔙 Back", "back_to_admin")]
+  ] }),
   maintenance: (isOn) => ({ inline_keyboard: [[BTN.inline(isOn ? "✅ Turn OFF" : "⛔ Turn ON", "toggle_maintenance")], [BTN.inline("🔙 Back", "admin_settings")]] }),
   smsSettings: () => ({ inline_keyboard: [[BTN.inline("🌍 Country", "admin_sms_edit:countryId"), BTN.inline("📡 Operator", "admin_sms_edit:operatorId")], [BTN.inline("🐦 Service", "admin_sms_edit:serviceId"), BTN.inline("💰 Max Price", "admin_sms_edit:maxPrice")], [BTN.inline("⏱ Timeout", "admin_sms_edit:timeout"), BTN.inline("🔄 Interval", "admin_sms_edit:interval")], [BTN.inline("📄 Current Config", "admin_sms_current")], [BTN.inline("🔙 Back", "admin_settings")]] }),
-  manageUser: (uId, isBan) => ({ inline_keyboard: [[BTN.inline("➕ Add Balance", `admin_add_bal:${uId}`), BTN.inline("➖ Deduct Balance", `admin_ded_bal:${uId}`)], [BTN.inline(isBan ? "✅ Unban User" : "⛔ Ban User", `toggle_ban:${uId}`)]] })
+  manageUser: (uId, isBan) => ({ inline_keyboard: [[BTN.inline("➕ Add Balance", `admin_add_bal:${uId}`), BTN.inline("➖ Deduct Balance", `admin_ded_bal:${uId}`)], [BTN.inline(isBan ? "✅ Unban User" : "⛔ Ban User", `toggle_ban:${uId}`)], [BTN.inline("🔙 Back", "back_to_admin")]] }),
+  numPrice: () => ({ inline_keyboard: [[BTN.inline("✏️ Change Price", "edit_num_price")], [BTN.inline("🔙 Back", "admin_settings")]] }),
+  refReward: () => ({ inline_keyboard: [[BTN.inline("✏️ Change Reward", "edit_ref_reward")], [BTN.inline("🔙 Back", "admin_settings")]] })
 };
 
 // Safe HTML entity escaping ONLY
@@ -152,7 +160,7 @@ async function processReferral(newUserId, referrerPayload) {
   const newTgId = BigInt(newUserId);
   if (referrerId === newTgId) return false;
 
-  return await prisma.$transaction(async (tx) => {
+  const res = await prisma.$transaction(async (tx) => {
     const referrer = await tx.user.findUnique({ where: { telegramId: referrerId } });
     const newUser = await tx.user.findUnique({ where: { telegramId: newTgId } });
     if (!referrer || !newUser) return false;
@@ -176,8 +184,15 @@ async function processReferral(newUserId, referrerPayload) {
     await tx.walletHistory.create({
       data: { userId: referrer.id, type: 'REFERRAL_BONUS', amount: bonus, description: `Referral bonus for ${newUserId}` }
     });
-    return true;
+    
+    return { success: true, referrerTgId: referrer.telegramId.toString(), bonus };
   });
+
+  if (res && res.success) {
+    await tg.sendMessage(res.referrerTgId, MSG.REF_COMPLETED.replace('{referralReward}', res.bonus)).catch(()=>{});
+    return true;
+  }
+  return false;
 }
 
 // ==========================================
@@ -253,7 +268,7 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
         if (otpsReceived >= 3) {
           await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
           await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
-          await tg.sendMessage(chatId, MSG.MAX_OTP_REACHED);
+          if (MSG.MAX_OTP_REACHED) await tg.sendMessage(chatId, MSG.MAX_OTP_REACHED);
           return;
         }
       }
@@ -345,14 +360,14 @@ async function handleUpdate(update) {
             sent++;
           } catch (err) {} 
         }
-        return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`);
+        return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
       }
 
       if (promptText.includes('Enter Telegram User ID to manage:')) {
-        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
+        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         const targetTgId = BigInt(txt);
         const uTarget = await prisma.user.findUnique({ where: { telegramId: targetTgId } });
-        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.');
+        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.', { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         
         const isBan = await isBanned(targetTgId);
         const info = `👤 <b>User Info</b>\n\n🆔 <b>ID:</b> <code>${txt}</code>\n💰 <b>Balance:</b> <code>₹${esc(uTarget.balance)}</code>\n👥 <b>Referrals:</b> <code>${uTarget.totalReferrals}</code>\n📅 <b>Joined:</b> <code>${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}</code>`;
@@ -413,16 +428,43 @@ async function handleUpdate(update) {
 
         const newSet = { ...cur, [field]: val };
         await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
-        return await tg.sendMessage(chatId, `✅ SMS Setting <code>${field}</code> updated to <code>${txt}</code>.`);
+        return await tg.sendMessage(chatId, `✅ SMS Setting <code>${field}</code> updated to <code>${txt}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+      }
+
+      if (promptText.includes('Enter new Number Price:')) {
+        const amt = Number(txt);
+        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid price.', { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+        const cur = await getSmsSettings();
+        const newSet = { ...cur, maxPrice: amt };
+        await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
+        return await tg.sendMessage(chatId, `✅ <b>Number Price</b> updated to <code>₹${amt}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+      }
+
+      if (promptText.includes('Enter new Referral Reward:')) {
+        const amt = Number(txt);
+        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid reward amount.', { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+        const cur = await getSysSettings();
+        const newSet = { ...cur, referralBonus: amt };
+        await prisma.setting.upsert({ where: { key: 'SYSTEM_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SYSTEM_SETTINGS', value: JSON.stringify(newSet) } });
+        return await tg.sendMessage(chatId, `✅ <b>Referral Reward</b> updated to <code>₹${amt}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
       }
     }
 
     if (txt.startsWith('/start')) {
       const payload = txt.split(' ')[1];
-      if (payload) pendingReferrals.set(userId, payload);
-      
-      await getUser(userId);
+      await getUser(userId); // Ensure user is created/fetched first
 
+      if (payload && /^\d+$/.test(payload) && payload !== String(userId)) {
+        const userInDb = await prisma.user.findUnique({ where: { telegramId: BigInt(userId) } });
+        if (userInDb) {
+          const existingRef = await prisma.referral.findUnique({ where: { referredId: userInDb.id } });
+          if (!existingRef && !pendingReferrals.has(userId)) {
+            pendingReferrals.set(userId, payload);
+            await tg.sendMessage(payload, MSG.REF_PENDING).catch(()=>{});
+          }
+        }
+      }
+      
       if (!(await verifyAccess(chatId, userId))) return;
 
       if (pendingReferrals.has(userId)) {
@@ -534,7 +576,7 @@ async function handleUpdate(update) {
         const cmpO = await prisma.order.count({ where: { status: 'COMPLETED' } });
         const rev = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'APPROVED' } });
         const statMsg = `📊 <b>Bot Statistics</b>\n\n👥 <b>Total Users:</b> <code>${totU}</code>\n🔄 <b>Active Orders:</b> <code>${actO}</code>\n✅ <b>Completed Orders:</b> <code>${cmpO}</code>\n💰 <b>Total Revenue:</b> <code>₹${rev._sum.amount || 0}</code>`;
-        await tg.sendMessage(chatId, statMsg);
+        await tg.sendMessage(chatId, statMsg, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         break;
 
       case '👥 Users':
@@ -545,19 +587,19 @@ async function handleUpdate(update) {
       case '💳 Payments':
         if (!admin) return;
         const pends = await prisma.payment.findMany({ where: { status: 'PENDING' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
-        if (!pends.length) return await tg.sendMessage(chatId, '💳 No pending payments.');
+        if (!pends.length) return await tg.sendMessage(chatId, '💳 No pending payments.', { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         let pTxt = `💳 <b>Recent Pending Payments</b>\n\n`;
         pends.forEach(p => pTxt += `🧾 <b>ID:</b> <code>${p.id}</code>\n👤 <b>User:</b> <code>${p.user.telegramId}</code>\n📅 <b>Date:</b> <code>${new Date(p.createdAt).toLocaleDateString('en-IN')}</code>\n💰 <b>Amount:</b> <code>₹${esc(p.amount)}</code>\n\n`);
-        await tg.sendMessage(chatId, pTxt);
+        await tg.sendMessage(chatId, pTxt, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         break;
 
       case '🛒 Orders':
         if (!admin) return;
         const acts = await prisma.order.findMany({ where: { status: 'ACTIVE' }, take: 5, orderBy: { createdAt: 'desc' }, include: { user: true } });
-        if (!acts.length) return await tg.sendMessage(chatId, '🛒 No active orders.');
+        if (!acts.length) return await tg.sendMessage(chatId, '🛒 No active orders.', { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         let oTxt = `🛒 <b>Recent Active Orders</b>\n\n`;
         acts.forEach(o => oTxt += `📱 <b>Number:</b> <code>${o.phoneNumber}</code>\n👤 <b>User:</b> <code>${o.user.telegramId}</code>\n🔑 <b>OTPs:</b> <code>${o.otpCount}</code>\n\n`);
-        await tg.sendMessage(chatId, oTxt);
+        await tg.sendMessage(chatId, oTxt, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         break;
 
       case '📢 Broadcast':
@@ -589,7 +631,7 @@ async function handleUpdate(update) {
       case 'verify_join':
         const isJoined = await checkForceJoin(userId);
         if (isJoined || admin) {
-          await tg.deleteMessage(chatId, msgId);
+          await tg.deleteMessage(chatId, msgId).catch(()=>{});
           if (pendingReferrals.has(userId)) {
             await processReferral(userId, pendingReferrals.get(userId));
             pendingReferrals.delete(userId);
@@ -658,6 +700,11 @@ async function handleUpdate(update) {
         await tg.sendMessage(args[1], MSG.PAYMENT_REJECTED);
         break;
 
+      case 'admin_settings':
+        if (!admin) return;
+        await tg.editMessage(chatId, msgId, "⚙️ <b>System Settings</b>", KB.adminSettings());
+        break;
+
       case 'admin_maintenance':
         if (!admin) return;
         const s = await getSysSettings();
@@ -680,12 +727,36 @@ async function handleUpdate(update) {
       case 'admin_sms_current':
         if (!admin) return;
         const smsConf = await getSmsSettings();
-        await tg.sendMessage(chatId, `📄 <b>Current Config</b>\nCountry: <code>${smsConf.countryId}</code>\nOperator: <code>${smsConf.operatorId}</code>\nService: <code>${smsConf.serviceId}</code>\nPrice: <code>₹${smsConf.maxPrice}</code>\nTimeout: <code>${smsConf.timeout}s</code>\nInterval: <code>${smsConf.interval}s</code>`);
+        await tg.sendMessage(chatId, `📄 <b>Current Config</b>\nCountry: <code>${smsConf.countryId}</code>\nOperator: <code>${smsConf.operatorId}</code>\nService: <code>${smsConf.serviceId}</code>\nPrice: <code>₹${smsConf.maxPrice}</code>\nTimeout: <code>${smsConf.timeout}s</code>\nInterval: <code>${smsConf.interval}s</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to SMS Settings", "admin_sms_settings")]] });
         break;
 
       case 'admin_sms_edit':
         if (!admin) return;
         await tg.sendMessage(chatId, `📡 Enter new value for SMS setting: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'admin_num_price':
+        if (!admin) return;
+        const sPrice = await getSmsSettings();
+        await tg.editMessage(chatId, msgId, `💰 <b>Number Price</b>\n\nCurrent Price: <code>₹${sPrice.maxPrice}</code>`, KB.numPrice());
+        break;
+
+      case 'admin_ref_reward':
+        if (!admin) return;
+        const sSys = await getSysSettings();
+        await tg.editMessage(chatId, msgId, `🎁 <b>Referral Reward</b>\n\nCurrent Reward: <code>₹${sSys.referralBonus}</code>`, KB.refReward());
+        break;
+
+      case 'edit_num_price':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '💰 Enter new Number Price:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'edit_ref_reward':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '🎁 Enter new Referral Reward:', { reply_markup: { force_reply: true, selective: true } });
         break;
 
       case 'toggle_ban':
@@ -710,6 +781,12 @@ async function handleUpdate(update) {
       case 'admin_ded_bal':
         if (!admin) return;
         await tg.sendMessage(chatId, `➖ Enter amount to deduct from user: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'back_to_admin':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, "🔧 <b>Admin Panel</b>", KB.adminMain);
         break;
     }
   }
