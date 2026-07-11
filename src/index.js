@@ -41,8 +41,9 @@ const MSG = {
   NUMBER_FAILED: "❌ <b>Purchase Failed</b>\n\nWe couldn't acquire a number at this time. Please try again later.",
   NO_BALANCE: "⚠️ <b>Insufficient Balance</b>\n\nPlease add funds to your wallet to purchase this number.",
   OTP_RECEIVED: "📩 <b>OTP #{count} Received</b>\n\n🔑 <b>OTP:</b>\n<code>{otp}</code>",
-  OTP_TIMEOUT_REFUND: "⌛ <b>Number expired.</b>\n\n💰 Full refund has been credited to your wallet.",
-  OTP_TIMEOUT_NO_REFUND: "⌛ <b>Number expired.</b>\n\n⚠️ At least one OTP was received.\n\n💰 No refund has been issued.",
+  MAX_OTP_REACHED: "✅ <b>Maximum OTP Limit Reached</b>\n\nThis number has received the maximum allowed OTPs.\n\nPlease purchase a new number if you need additional OTPs.",
+  OTP_TIMEOUT_REFUND: "⌛ <b>Number Expired</b>\n\nNo OTP was received within 15 minutes.\n\n💰 Full refund has been credited to your wallet.",
+  OTP_TIMEOUT_NO_REFUND: "⌛ <b>Number Expired</b>\n\nThe 15-minute validity period has ended.\n\n⚠️ At least one OTP was received.\n\n💰 No refund has been issued.",
   ORDER_CANCELLED_REFUND: "❌ <b>Number Cancelled Successfully</b>\n\n💰 Full refund has been credited to your wallet.",
   ORDER_CANCELLED_NO_REFUND: "❌ <b>Number Cancelled Successfully</b>\n\n⚠️ At least one OTP was already received.\n\n💰 No refund has been issued.",
   PAYMENT_INSTRUCT: "━━━━━━━━━━━━━━━━━━━━\n💳 UPI ID:\n<code>{upi}</code>\n\n📷 After completing the payment, send the payment screenshot.\n\n📝 In the photo caption, write ONLY the payment amount.\n\nExample:\n100\n\n❌ Don't write:\nAmount: 100\nPaid 100\n100 INR\nPayment done\n\n✅ Write only:\n100\n━━━━━━━━━━━━━━━━━━━━",
@@ -272,54 +273,75 @@ async function cancelSms(activationId) {
 // ==========================================
 
 async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, price, msgId, interval) {
-  // IMPLEMENTATION: Auto-expiry set to exactly 15 minutes
-  const timeoutInMinutes = 15;
-  const endTime = Date.now() + (timeoutInMinutes * 60 * 1000);
-  let otpsReceived = 0;
-  let lastOtp = null;
+  const processedOtps = new Set(); // Fix: Advanced duplicate filter
 
   try {
-    while (Date.now() < endTime) {
-      await new Promise(r => setTimeout(r, interval * 1000));
+    // Dynamic Polling Loop checking strict DB expiry time
+    while (true) {
       const order = await prisma.order.findUnique({ where: { id: orderId } });
       if (!order || order.status !== 'ACTIVE') return;
+
+      // Break exactly when the DB expiresAt timestamp is met or passed
+      if (new Date() >= order.expiresAt) break;
 
       const stat = await getSmsStatus(activationId);
       const code = stat.code || stat.otpCode || stat.text;
       
-      if (stat.status === 'RECEIVED' && code && code !== lastOtp) {
-        lastOtp = code;
-        otpsReceived++;
+      // Strict duplicate detection checking the Set
+      if (stat.status === 'RECEIVED' && code && !processedOtps.has(code)) {
+        processedOtps.add(code);
+        
+        const otpsReceived = order.otpCount + 1;
         await prisma.order.update({ where: { id: orderId }, data: { otpCount: otpsReceived } });
 
-        await tg.sendMessage(chatId, MSG.OTP_RECEIVED.replace('{count}', otpsReceived).replace('{otp}', esc(lastOtp)));
+        // Forward OTP to the customer exactly as requested
+        await tg.sendMessage(chatId, MSG.OTP_RECEIVED.replace('{count}', otpsReceived).replace('{otp}', esc(code)));
 
+        // CRITICAL FIX: Notify the API provider to release the NEXT SMS
+        try {
+          await fetch(buildSmsUrl({ action: 'setStatus', status: 3, id: activationId }));
+        } catch (e) {}
+
+        // Check Maximum Limit
         if (otpsReceived >= 3) {
           await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
-          await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
-          if (MSG.MAX_OTP_REACHED) await tg.sendMessage(chatId, MSG.MAX_OTP_REACHED);
-          return;
+          if (msgId) await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] }).catch(()=>{});
+          await tg.sendMessage(chatId, MSG.MAX_OTP_REACHED).catch(()=>{});
+          return; // Exit completely after max OTPs
         }
       }
+      
+      // Wait for the next interval cycle
+      await new Promise(r => setTimeout(r, interval * 1000));
     }
 
-    // Auto-expiry Logic: Triggered here if loop exits due to time
+    // Auto-Expiry & Refund Logic Triggered Here
     const fOrder = await prisma.order.findUnique({ where: { id: orderId } });
     if (!fOrder || fOrder.status !== 'ACTIVE') return;
 
-    if (otpsReceived === 0) {
+    if (fOrder.otpCount === 0) {
       await cancelSms(activationId);
       
       await prisma.$transaction([
         prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }),
-        prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } }),
-        prisma.walletHistory.create({ data: { userId: userDbId, type: 'REFUND', amount: price, description: `Timeout refund: ${phone}` } })
+        prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } })
+        // Note: No Wallet History record created, per instruction.
       ]);
 
-      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND, { inline_keyboard: [] });
+      if (msgId) {
+        await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND, { inline_keyboard: [] }).catch(()=>{});
+      } else {
+        await tg.sendMessage(chatId, MSG.OTP_TIMEOUT_REFUND).catch(()=>{});
+      }
     } else {
+      // At least 1 OTP received, strictly marking order COMPLETED (expired state for >=1 OTP) with no refund
       await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
-      await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] });
+      
+      if (msgId) {
+        await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] }).catch(()=>{});
+      } else {
+        await tg.sendMessage(chatId, MSG.OTP_TIMEOUT_NO_REFUND).catch(()=>{});
+      }
     }
   } catch (error) { console.error(`[POLLING ERR] Order: ${orderId}`, error); }
 }
@@ -915,8 +937,33 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // ==========================================
-// 8. SERVER STARTUP & SHUTDOWN
+// 8. SERVER STARTUP, RESUME & SHUTDOWN
 // ==========================================
+
+async function resumeActiveOrders() {
+  try {
+    const activeOrders = await prisma.order.findMany({ where: { status: 'ACTIVE' }, include: { user: true } });
+    if (activeOrders.length === 0) return;
+    
+    const smsSet = await getSmsSettings();
+    for (const order of activeOrders) {
+      // Re-initialize polling. msgId is null since it's lost from RAM, but text sending fallback is built-in.
+      startOtpPolling(
+        order.user.telegramId.toString(), 
+        order.userId, 
+        order.id, 
+        order.activationId, 
+        order.phoneNumber, 
+        order.price, 
+        null, 
+        smsSet.interval || 10
+      );
+    }
+    server.log.info(`[SERVER] 🔄 Resumed polling for ${activeOrders.length} active orders.`);
+  } catch (error) {
+    server.log.error('[SERVER] ⚠️ Failed to resume active orders', error);
+  }
+}
 
 async function setupWebhookWithRetry(baseUrl, secret, maxRetries = 5) {
   const cleanBaseUrl = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
@@ -962,6 +1009,9 @@ const start = async () => {
     const host = CONFIG.server.host || '0.0.0.0';
     await server.listen({ port: CONFIG.server.port, host });
     server.log.info(`[SERVER] 🚀 Running on http://${host}:${CONFIG.server.port}`);
+
+    // Resume any orders that were left active before a restart/redeploy
+    await resumeActiveOrders();
 
     if (CONFIG.webhook.url && CONFIG.webhook.secret) {
       await setupWebhookWithRetry(CONFIG.webhook.url, CONFIG.webhook.secret);
