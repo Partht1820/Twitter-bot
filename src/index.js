@@ -20,6 +20,9 @@ server.register(formbody);
 // In-memory store for pending referrals awaiting Force Join verification
 const pendingReferrals = new Map();
 
+// In-memory store to track and prevent duplicate callback queries
+const answeredCallbacks = new Set();
+
 // ==========================================
 // 2. CONSTANTS: MESSAGES & KEYBOARDS
 // ==========================================
@@ -664,12 +667,25 @@ async function handleUpdate(update) {
   // --- CALLBACK ROUTER ---
   if (update.callback_query) {
     const cb = update.callback_query;
+    
+    // Prevent duplicate processing entirely for the same callback ID
+    if (answeredCallbacks.has(cb.id)) return;
+    answeredCallbacks.add(cb.id);
+    // Cleanup memory after 2 minutes (Telegram callbacks usually expire in ~15s anyway)
+    setTimeout(() => answeredCallbacks.delete(cb.id), 120000); 
+
+    // Answer immediately before ANY database queries, network requests, or logic
+    try { 
+      await tg.answerCallbackQuery(cb.id); 
+    } catch (e) {
+      // Silently ignore if already answered or expired (HTTP 400)
+    }
+
     const chatId = cb.message?.chat?.id;
     const msgId = cb.message?.message_id;
     const userId = cb.from?.id;
     if (!chatId || !userId) return;
 
-    try { await tg.answerCallbackQuery(cb.id); } catch(e){}
     const dataParts = cb.data ? cb.data.split(':') : [];
     const action = dataParts[0];
     const args = dataParts.slice(1);
@@ -686,7 +702,8 @@ async function handleUpdate(update) {
           }
           await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
         } else {
-          await tg.answerCallbackQuery(cb.id, { text: "❌ Please join BOTH the Channel and the Group to continue.", show_alert: true });
+          // Replaced answerCallbackQuery with sendMessage to prevent duplicate answer errors
+          await tg.sendMessage(chatId, "❌ Please join BOTH the Channel and the Group to continue.");
         }
         break;
 
