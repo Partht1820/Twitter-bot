@@ -29,7 +29,7 @@ const answeredCallbacks = new Set();
 
 const MSG = {
   WELCOME: "👋 <b>Welcome to our Premium OTP Service!</b>\n\nPlease use the menu below to navigate.",
-  PLEASE_WAIT: "✋ Please wait a moment before trying again.",
+  ACTIVE_ORDER_EXISTS: "⚠️ <b>Active Number Detected</b>\n\nYou already have an active Twitter number.\n\nBefore purchasing another number, please:\n\n• Cancel your current number\n\nOR\n\n• Wait until all 3 OTPs are received\n\nOR\n\n• Wait for the number to expire automatically.\n\nYou cannot purchase another number until the current order is finished.",
   MAINTENANCE_MODE: "🛠️ <b>Maintenance Mode</b>\n\nOur service is currently undergoing scheduled maintenance.",
   INTERNAL_ERROR: "❌ <b>System Error</b>\n\nAn unexpected error occurred.",
   UNKNOWN_ERROR: "❓ <b>Unknown Error</b>\n\nSomething went wrong. Please try again later.",
@@ -110,6 +110,16 @@ function esc(text) {
 // ==========================================
 // 3. DATABASE HELPER FUNCTIONS
 // ==========================================
+
+async function markUserActive(userId) {
+  if (!userId) return;
+  try {
+    await prisma.user.updateMany({
+      where: { telegramId: BigInt(userId) },
+      data: { updatedAt: new Date() }
+    });
+  } catch (e) {}
+}
 
 async function getMessages() {
   let dbMsgs = await prisma.setting.findUnique({ where: { key: 'CUSTOM_MESSAGES' } });
@@ -399,6 +409,9 @@ async function handleUpdate(update) {
       return;
     }
 
+    // Track active user activity silently
+    await markUserActive(userId);
+
     const admin = await isAdmin(userId);
 
     // Handle Photos (QR Code Upload or Payment Screenshots)
@@ -664,7 +677,7 @@ async function handleUpdate(update) {
       case '🐦 Get Twitter Number':
         const uBuy = await getUser(userId);
         const act = await prisma.order.findFirst({ where: { userId: uBuy.id, status: 'ACTIVE' } });
-        if (act) return await tg.sendMessage(chatId, M.PLEASE_WAIT);
+        if (act) return await tg.sendMessage(chatId, M.ACTIVE_ORDER_EXISTS || MSG.ACTIVE_ORDER_EXISTS);
         
         const smsSet = await getSmsSettings();
         if (uBuy.balance.toNumber() < smsSet.maxPrice) return await tg.sendMessage(chatId, M.NO_BALANCE);
@@ -763,10 +776,29 @@ async function handleUpdate(update) {
       case '📊 Statistics':
         if (!admin) return;
         const totU = await prisma.user.count();
+        
+        let actU = 0;
+        try {
+           actU = await prisma.user.count({ 
+              where: { updatedAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } } 
+           });
+        } catch(e) { actU = 'N/A'; }
+        
+        const succOrders = await prisma.order.count({ where: { otpCount: { gte: 1 } } });
         const actO = await prisma.order.count({ where: { status: 'ACTIVE' } });
-        const cmpO = await prisma.order.count({ where: { status: 'COMPLETED' } });
-        const rev = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'APPROVED' } });
-        const statMsg = `📊 <b>Bot Statistics</b>\n\n👥 <b>Total Users:</b> <code>${totU}</code>\n🔄 <b>Active Orders:</b> <code>${actO}</code>\n✅ <b>Completed Orders:</b> <code>${cmpO}</code>\n💰 <b>Total Revenue:</b> <code>₹${rev._sum.amount || 0}</code>`;
+        
+        const revAg = await prisma.payment.aggregate({ _sum: { amount: true }, where: { status: 'APPROVED' } });
+        const revAmt = Number(revAg._sum.amount || 0);
+        
+        const walAg = await prisma.user.aggregate({ _sum: { balance: true } });
+        const totWal = Number(walAg._sum.balance || 0);
+        
+        const profitAg = await prisma.order.aggregate({ _sum: { price: true }, where: { otpCount: { gte: 1 } } });
+        const totPrice = Number(profitAg._sum.price || 0);
+        const profit = totPrice - (succOrders * 0.52);
+
+        const statMsg = `📊 <b>Bot Statistics</b>\n\n👥 <b>Total Users:</b>\n${totU}\n\n🟢 <b>Active Users:</b>\n${actU}\n\n📦 <b>Successful Purchases:</b>\n${succOrders}\n\n⏳ <b>Active Orders:</b>\n${actO}\n\n💳 <b>Total Deposits:</b>\n₹${revAmt}\n\n💰 <b>Total Wallet Funds:</b>\n₹${totWal}\n\n📈 <b>Total Profit:</b>\n₹${profit.toFixed(2)}`;
+        
         await tg.sendMessage(chatId, statMsg, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         break;
 
@@ -837,6 +869,9 @@ async function handleUpdate(update) {
     const msgId = cb.message?.message_id;
     const userId = cb.from?.id;
     if (!chatId || !userId) return;
+
+    // Track active user activity silently
+    await markUserActive(userId);
 
     const dataParts = cb.data ? cb.data.split(':') : [];
     const action = dataParts[0];
