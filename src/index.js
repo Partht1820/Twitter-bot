@@ -391,6 +391,14 @@ async function handleUpdate(update) {
     const userId = msg.from?.id;
     if (!chatId || !userId) return;
 
+    // Block non-private chats completely
+    if (msg.chat?.type !== 'private') {
+      if (msg.text && msg.text.startsWith('/')) {
+        await tg.sendMessage(chatId, "⚠️ Please use this bot in private chat.");
+      }
+      return;
+    }
+
     const admin = await isAdmin(userId);
 
     // Handle Photos (QR Code Upload or Payment Screenshots)
@@ -805,6 +813,12 @@ async function handleUpdate(update) {
   // --- CALLBACK ROUTER ---
   if (update.callback_query) {
     const cb = update.callback_query;
+
+    // Block non-private chats completely for callbacks as well
+    if (cb.message?.chat?.type && cb.message.chat.type !== 'private') {
+      try { await tg.answerCallbackQuery(cb.id, { text: "⚠️ Please use this bot in private chat.", show_alert: true }); } catch(e){}
+      return;
+    }
     
     // Prevent duplicate processing entirely for the same callback ID
     if (answeredCallbacks.has(cb.id)) return;
