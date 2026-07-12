@@ -81,7 +81,7 @@ const KB = {
   ] }),
   maintenance: (isOn) => ({ inline_keyboard: [[BTN.inline(isOn ? "✅ Turn OFF" : "⛔ Turn ON", "toggle_maintenance")], [BTN.inline("🔙 Back", "admin_settings")]] }),
   smsSettings: () => ({ inline_keyboard: [[BTN.inline("🌍 Country", "admin_sms_edit:countryId"), BTN.inline("📡 Operator", "admin_sms_edit:operatorId")], [BTN.inline("🐦 Service", "admin_sms_edit:serviceId"), BTN.inline("💰 Max Price", "admin_sms_edit:maxPrice")], [BTN.inline("⏱ Timeout", "admin_sms_edit:timeout"), BTN.inline("🔄 Interval", "admin_sms_edit:interval")], [BTN.inline("📄 Current Config", "admin_sms_current")], [BTN.inline("🔙 Back", "admin_settings")]] }),
-  manageUser: (uId, isBan) => ({ inline_keyboard: [[BTN.inline("➕ Add Balance", `admin_add_bal:${uId}`), BTN.inline("➖ Deduct Balance", `admin_ded_bal:${uId}`)], [BTN.inline(isBan ? "✅ Unban User" : "⛔ Ban User", `toggle_ban:${uId}`)], [BTN.inline("🔙 Back", "back_to_admin")]] }),
+  manageUser: (uId, isBan) => ({ inline_keyboard: [[BTN.inline("➕ Add Balance", `admin_add_bal:${uId}`), BTN.inline("➖ Deduct Balance", `admin_ded_bal:${uId}`)], [BTN.inline(isBan ? "✅ Unban User" : "⛔ Ban User", `toggle_ban:${uId}`)], [BTN.inline("🔙 Back", "admin_users_menu")]] }),
   numPrice: () => ({ inline_keyboard: [[BTN.inline("✏️ Change Price", "edit_num_price")], [BTN.inline("🔙 Back", "admin_settings")]] }),
   refReward: () => ({ inline_keyboard: [[BTN.inline("✏️ Change Reward", "edit_ref_reward")], [BTN.inline("🔙 Back", "admin_settings")]] })
 };
@@ -415,13 +415,34 @@ async function handleUpdate(update) {
       }
 
       if (promptText.includes('Enter Telegram User ID to manage:')) {
-        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
+        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_users_menu")]] });
         const targetTgId = BigInt(txt);
         const uTarget = await prisma.user.findUnique({ where: { telegramId: targetTgId } });
-        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.', { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
+        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_users_menu")]] });
         
         const isBan = await isBanned(targetTgId);
-        const info = `👤 <b>User Info</b>\n\n🆔 <b>ID:</b> <code>${txt}</code>\n💰 <b>Balance:</b> <code>₹${esc(uTarget.balance)}</code>\n👥 <b>Referrals:</b> <code>${uTarget.totalReferrals}</code>\n📅 <b>Joined:</b> <code>${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}</code>`;
+        
+        const totOrders = await prisma.order.count({ where: { userId: uTarget.id } });
+        
+        const totSpentAgg = await prisma.order.aggregate({
+           _sum: { price: true },
+           where: { userId: uTarget.id, status: { in: ['ACTIVE', 'COMPLETED'] } }
+        });
+        const totSpent = Number(totSpentAgg._sum.price || 0);
+
+        const totDepositsAgg = await prisma.walletHistory.aggregate({
+           _sum: { amount: true },
+           where: { userId: uTarget.id, type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS'] } }
+        });
+        const totDeposits = Number(totDepositsAgg._sum.amount || 0);
+        
+        const fn = uTarget.firstName || '';
+        const ln = uTarget.lastName || '';
+        const name = `${fn} ${ln}`.trim() || 'Not Set';
+        const username = uTarget.username ? `@${uTarget.username}` : 'Not Set';
+
+        const info = `👤 <b>User Information</b>\n\n🆔 <b>User ID:</b>\n<code>${txt}</code>\n\n👤 <b>Username:</b>\n${esc(username)}\n\n📝 <b>Name:</b>\n${esc(name)}\n\n💰 <b>Current Balance:</b>\n₹${esc(uTarget.balance)}\n\n💳 <b>Total Deposited:</b>\n₹${totDeposits}\n\n🛒 <b>Total Spent:</b>\n₹${totSpent}\n\n📦 <b>Total Orders:</b>\n${totOrders}\n\n👥 <b>Total Referrals:</b>\n${uTarget.totalReferrals}\n\n📅 <b>Joined:</b>\n${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}`;
+        
         return await tg.sendMessage(chatId, info, KB.manageUser(txt, isBan));
       }
 
@@ -654,7 +675,13 @@ async function handleUpdate(update) {
 
       case '👥 Users':
         if (!admin) return;
-        await tg.sendMessage(chatId, '👤 Enter Telegram User ID to manage:', { reply_markup: { force_reply: true, selective: true } });
+        await tg.sendMessage(chatId, "👥 <b>Users Menu</b>\n\nSelect an option below:", {
+          inline_keyboard: [
+            [BTN.inline("👤 User Lookup", "admin_user_lookup")],
+            [BTN.inline("📊 All Users Wallet", "admin_all_users_page:1")],
+            [BTN.inline("🔙 Back", "back_to_admin")]
+          ]
+        });
         break;
 
       case '💳 Payments':
@@ -785,6 +812,101 @@ async function handleUpdate(update) {
         await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
         await tg.sendMessage(chatId, `❌ Payment <code>${args[0]}</code> Rejected.`);
         await tg.sendMessage(args[1], MSG.PAYMENT_REJECTED);
+        break;
+
+      case 'admin_users_menu':
+        if (!admin) return;
+        await tg.editMessage(chatId, msgId, "👥 <b>Users Menu</b>\n\nSelect an option below:", {
+          inline_keyboard: [
+            [BTN.inline("👤 User Lookup", "admin_user_lookup")],
+            [BTN.inline("📊 All Users Wallet", "admin_all_users_page:1")],
+            [BTN.inline("🔙 Back", "back_to_admin")]
+          ]
+        }).catch(()=>{});
+        break;
+
+      case 'admin_user_lookup':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '👤 Enter Telegram User ID to manage:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'admin_all_users_page':
+        if (!admin) return;
+        const page = parseInt(args[0]) || 1;
+        
+        const allUsers = await prisma.user.findMany();
+        const userStats = new Map();
+        
+        for (const u of allUsers) {
+          const fn = u.firstName || '';
+          const ln = u.lastName || '';
+          userStats.set(u.id, {
+            telegramId: u.telegramId.toString(),
+            name: `${fn} ${ln}`.trim() || 'Not Set',
+            username: u.username ? `@${u.username}` : 'Not Set',
+            balance: Number(u.balance || 0),
+            deposited: 0,
+            spent: 0,
+            orders: 0
+          });
+        }
+
+        const allOrders = await prisma.order.findMany({
+          select: { userId: true, price: true, status: true }
+        });
+        for (const o of allOrders) {
+          if (userStats.has(o.userId)) {
+            userStats.get(o.userId).orders += 1;
+            if (o.status === 'ACTIVE' || o.status === 'COMPLETED') {
+              userStats.get(o.userId).spent += Number(o.price || 0);
+            }
+          }
+        }
+
+        const validDeposits = await prisma.walletHistory.findMany({
+          where: { type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS'] } },
+          select: { userId: true, amount: true }
+        });
+        for (const d of validDeposits) {
+          if (userStats.has(d.userId)) {
+            userStats.get(d.userId).deposited += Number(d.amount || 0);
+          }
+        }
+
+        const sortedUsers = Array.from(userStats.values()).sort((a, b) => b.spent - a.spent);
+        
+        const limit = 20;
+        const totalPages = Math.ceil(sortedUsers.length / limit) || 1;
+        const validPage = Math.max(1, Math.min(page, totalPages));
+        const startIdx = (validPage - 1) * limit;
+        const endIdx = startIdx + limit;
+        const pageUsers = sortedUsers.slice(startIdx, endIdx);
+
+        let msgTxt = `📊 <b>All Users Wallet (Page ${validPage}/${totalPages})</b>\n\n`;
+        let rank = startIdx + 1;
+        for (const u of pageUsers) {
+          msgTxt += `${rank}.\n`;
+          msgTxt += `👤 <b>Name:</b> ${esc(u.name)}\n`;
+          msgTxt += `👤 <b>Username:</b> ${esc(u.username)}\n`;
+          msgTxt += `🆔 <b>User ID:</b> <code>${u.telegramId}</code>\n`;
+          msgTxt += `💰 <b>Balance:</b> ₹${u.balance}\n`;
+          msgTxt += `💳 <b>Deposited:</b> ₹${u.deposited}\n`;
+          msgTxt += `🛒 <b>Spent:</b> ₹${u.spent}\n`;
+          msgTxt += `📦 <b>Orders:</b> ${u.orders}\n`;
+          msgTxt += `━━━━━━━━━━━━━━━\n\n`;
+          rank++;
+        }
+
+        const pageButtons = [];
+        if (validPage > 1) pageButtons.push(BTN.inline("⬅️ Previous", `admin_all_users_page:${validPage - 1}`));
+        if (validPage < totalPages) pageButtons.push(BTN.inline("➡️ Next", `admin_all_users_page:${validPage + 1}`));
+        
+        const userKbd = [];
+        if (pageButtons.length > 0) userKbd.push(pageButtons);
+        userKbd.push([BTN.inline("🔙 Back", "admin_users_menu")]);
+
+        await tg.editMessage(chatId, msgId, msgTxt, { inline_keyboard: userKbd }).catch(()=>{});
         break;
 
       case 'admin_settings':
