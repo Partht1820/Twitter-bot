@@ -46,7 +46,7 @@ const MSG = {
   OTP_TIMEOUT_NO_REFUND: "⌛ <b>Number Expired</b>\n\nThe 15-minute validity period has ended.\n\n⚠️ At least one OTP was received.\n\n💰 No refund has been issued.",
   ORDER_CANCELLED_REFUND: "❌ <b>Number Cancelled Successfully</b>\n\n💰 Full refund has been credited to your wallet.",
   ORDER_CANCELLED_NO_REFUND: "❌ <b>Number Cancelled Successfully</b>\n\n⚠️ At least one OTP was already received.\n\n💰 No refund has been issued.",
-  PAYMENT_INSTRUCT: "━━━━━━━━━━━━━━━━━━━━\n💳 UPI ID:\n<code>{upi}</code>\n\n📷 After completing the payment, send the payment screenshot.\n\n📝 In the photo caption, write ONLY the payment amount.\n\nExample:\n100\n\n❌ Don't write:\nAmount: 100\nPaid 100\n100 INR\nPayment done\n\n✅ Write only:\n100\n━━━━━━━━━━━━━━━━━━━━",
+  ADD_BALANCE: "💳 <b>Add Balance</b>\n\n🖼 <b>Scan QR</b>\n\n🏦 <code>{upi}</code>\n\n💵 <b>Min Deposit:</b> <code>₹{minimumDeposit}</code>\n━━━━━━━━━━━━━━\n📷 Send payment screenshot.\n📝 Caption: <code>100</code>\n❌ No text, only amount.",
   PAYMENT_CAPTION_ERROR: "❌ Please send the payment screenshot with only the amount in the caption. Example: 100",
   PAYMENT_SUBMITTED: "📤 <b>Payment Submitted</b>\n\nYour screenshot has been sent to the admin for review. Please wait for approval.",
   PAYMENT_APPROVED: "✅ <b>Payment Approved</b>\n\n<code>₹{amount}</code> has been successfully added to your wallet.",
@@ -70,6 +70,7 @@ const KB = {
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
   adminSettings: () => ({ inline_keyboard: [
     [BTN.inline("💰 Number Price", "admin_num_price"), BTN.inline("🎁 Referral Reward", "admin_ref_reward")],
+    [BTN.inline("💳 Payment Settings", "pay_settings"), BTN.inline("💬 Message Editor", "msg_editor")],
     [BTN.inline("🚫 Force Join Bypass", "admin_bypass")],
     [BTN.inline("🛠️ Maintenance Mode", "admin_maintenance"), BTN.inline("📡 SMS Settings", "admin_sms_settings")],
     [BTN.inline("🔙 Back", "back_to_admin")]
@@ -83,7 +84,18 @@ const KB = {
   smsSettings: () => ({ inline_keyboard: [[BTN.inline("🌍 Country", "admin_sms_edit:countryId"), BTN.inline("📡 Operator", "admin_sms_edit:operatorId")], [BTN.inline("🐦 Service", "admin_sms_edit:serviceId"), BTN.inline("💰 Max Price", "admin_sms_edit:maxPrice")], [BTN.inline("⏱ Timeout", "admin_sms_edit:timeout"), BTN.inline("🔄 Interval", "admin_sms_edit:interval")], [BTN.inline("📄 Current Config", "admin_sms_current")], [BTN.inline("🔙 Back", "admin_settings")]] }),
   manageUser: (uId, isBan) => ({ inline_keyboard: [[BTN.inline("➕ Add Balance", `admin_add_bal:${uId}`), BTN.inline("➖ Deduct Balance", `admin_ded_bal:${uId}`)], [BTN.inline(isBan ? "✅ Unban User" : "⛔ Ban User", `toggle_ban:${uId}`)], [BTN.inline("🔙 Back", "admin_users_menu")]] }),
   numPrice: () => ({ inline_keyboard: [[BTN.inline("✏️ Change Price", "edit_num_price")], [BTN.inline("🔙 Back", "admin_settings")]] }),
-  refReward: () => ({ inline_keyboard: [[BTN.inline("✏️ Change Reward", "edit_ref_reward")], [BTN.inline("🔙 Back", "admin_settings")]] })
+  refReward: () => ({ inline_keyboard: [[BTN.inline("✏️ Change Reward", "edit_ref_reward")], [BTN.inline("🔙 Back", "admin_settings")]] }),
+  messageEditor: () => ({ inline_keyboard: [
+    [BTN.inline("👋 Welcome", "edit_msg:WELCOME"), BTN.inline("💳 Add Balance", "edit_msg:ADD_BALANCE")],
+    [BTN.inline("📱 Number Activated", "edit_msg:NUMBER_SUCCESS"), BTN.inline("📩 OTP Received", "edit_msg:OTP_RECEIVED")],
+    [BTN.inline("⌛ Expired (Refund)", "edit_msg:OTP_TIMEOUT_REFUND"), BTN.inline("⌛ Expired (No Refund)", "edit_msg:OTP_TIMEOUT_NO_REFUND")],
+    [BTN.inline("❌ Cancelled (Refund)", "edit_msg:ORDER_CANCELLED_REFUND"), BTN.inline("❌ Cancelled (No Refund)", "edit_msg:ORDER_CANCELLED_NO_REFUND")],
+    [BTN.inline("✅ Payment Approved", "edit_msg:PAYMENT_APPROVED"), BTN.inline("❌ Payment Rejected", "edit_msg:PAYMENT_REJECTED")],
+    [BTN.inline("👤 My Account", "edit_msg:MY_ACCOUNT"), BTN.inline("📜 Wallet History", "edit_msg:WALLET_EMPTY")],
+    [BTN.inline("🎁 Refer & Earn", "edit_msg:REFER_INFO"), BTN.inline("📞 Support", "edit_msg:SUPPORT")],
+    [BTN.inline("🚫 Force Join", "edit_msg:FORCE_JOIN"), BTN.inline("🛠 Maintenance", "edit_msg:MAINTENANCE_MODE")],
+    [BTN.inline("🔙 Back", "admin_settings")]
+  ] })
 };
 
 // Safe HTML entity escaping ONLY
@@ -98,6 +110,32 @@ function esc(text) {
 // ==========================================
 // 3. DATABASE HELPER FUNCTIONS
 // ==========================================
+
+async function getMessages() {
+  let dbMsgs = await prisma.setting.findUnique({ where: { key: 'CUSTOM_MESSAGES' } });
+  
+  // FIRST START RULE: Automatically copy hardcoded message into database if it doesn't exist
+  if (!dbMsgs) {
+    dbMsgs = await prisma.setting.create({ 
+      data: { key: 'CUSTOM_MESSAGES', value: JSON.stringify(MSG) } 
+    });
+  }
+  
+  return { ...MSG, ...JSON.parse(dbMsgs.value) };
+}
+
+async function getPaymentSettings() {
+  const s = await prisma.setting.findUnique({ where: { key: 'PAYMENT_SETTINGS' } });
+  return s ? JSON.parse(s.value) : { upiId: "Skywardstudio@ybl", qrFileId: null, minDeposit: 10 };
+}
+
+async function savePaymentSettings(newSet) {
+  await prisma.setting.upsert({
+    where: { key: 'PAYMENT_SETTINGS' },
+    update: { value: JSON.stringify(newSet) },
+    create: { key: 'PAYMENT_SETTINGS', value: JSON.stringify(newSet) }
+  });
+}
 
 async function getSysSettings() {
   const s = await prisma.setting.findUnique({ where: { key: 'SYSTEM_SETTINGS' } });
@@ -170,15 +208,16 @@ async function checkForceJoin(userId) {
 }
 
 async function verifyAccess(chatId, userId) {
-  if (await isBanned(userId)) { await tg.sendMessage(chatId, MSG.BANNED); return false; }
+  const M = await getMessages();
+  if (await isBanned(userId)) { await tg.sendMessage(chatId, M.BANNED); return false; }
   const sys = await getSysSettings();
-  if (sys?.isMaintenanceMode && !(await isAdmin(userId))) { await tg.sendMessage(chatId, MSG.MAINTENANCE_MODE); return false; }
+  if (sys?.isMaintenanceMode && !(await isAdmin(userId))) { await tg.sendMessage(chatId, M.MAINTENANCE_MODE); return false; }
   
   const isJoined = await checkForceJoin(userId);
   if (!isJoined) {
     const channel = sys?.forceJoinChannel || CONFIG.telegram.forceJoinChannel;
     const group = sys?.forceJoinGroup || CONFIG.telegram.forceJoinGroup;
-    await tg.sendMessage(chatId, MSG.FORCE_JOIN, KB.forceJoin(channel, group));
+    await tg.sendMessage(chatId, M.FORCE_JOIN, KB.forceJoin(channel, group));
     return false;
   }
   return true;
@@ -219,7 +258,8 @@ async function processReferral(newUserId, referrerPayload) {
   });
 
   if (res && res.success) {
-    await tg.sendMessage(res.referrerTgId, MSG.REF_COMPLETED.replace('{referralReward}', res.bonus)).catch(()=>{});
+    const M = await getMessages();
+    await tg.sendMessage(res.referrerTgId, M.REF_COMPLETED.replace('{referralReward}', res.bonus)).catch(()=>{});
     return true;
   }
   return false;
@@ -273,49 +313,42 @@ async function cancelSms(activationId) {
 // ==========================================
 
 async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, price, msgId, interval) {
-  const processedOtps = new Set(); // Fix: Advanced duplicate filter
+  const processedOtps = new Set();
+  const M = await getMessages();
 
   try {
-    // Dynamic Polling Loop checking strict DB expiry time
     while (true) {
       const order = await prisma.order.findUnique({ where: { id: orderId } });
       if (!order || order.status !== 'ACTIVE') return;
 
-      // Break exactly when the DB expiresAt timestamp is met or passed
       if (new Date() >= order.expiresAt) break;
 
       const stat = await getSmsStatus(activationId);
       const code = stat.code || stat.otpCode || stat.text;
       
-      // Strict duplicate detection checking the Set
       if (stat.status === 'RECEIVED' && code && !processedOtps.has(code)) {
         processedOtps.add(code);
         
         const otpsReceived = order.otpCount + 1;
         await prisma.order.update({ where: { id: orderId }, data: { otpCount: otpsReceived } });
 
-        // Forward OTP to the customer exactly as requested
-        await tg.sendMessage(chatId, MSG.OTP_RECEIVED.replace('{count}', otpsReceived).replace('{otp}', esc(code)));
+        await tg.sendMessage(chatId, M.OTP_RECEIVED.replace('{count}', otpsReceived).replace('{otp}', esc(code)));
 
-        // CRITICAL FIX: Notify the API provider to release the NEXT SMS
         try {
           await fetch(buildSmsUrl({ action: 'setStatus', status: 3, id: activationId }));
         } catch (e) {}
 
-        // Check Maximum Limit
         if (otpsReceived >= 3) {
           await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
           if (msgId) await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] }).catch(()=>{});
-          await tg.sendMessage(chatId, MSG.MAX_OTP_REACHED).catch(()=>{});
-          return; // Exit completely after max OTPs
+          if (M.MAX_OTP_REACHED) await tg.sendMessage(chatId, M.MAX_OTP_REACHED).catch(()=>{});
+          return;
         }
       }
       
-      // Wait for the next interval cycle
       await new Promise(r => setTimeout(r, interval * 1000));
     }
 
-    // Auto-Expiry & Refund Logic Triggered Here
     const fOrder = await prisma.order.findUnique({ where: { id: orderId } });
     if (!fOrder || fOrder.status !== 'ACTIVE') return;
 
@@ -325,22 +358,20 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
       await prisma.$transaction([
         prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }),
         prisma.user.update({ where: { id: userDbId }, data: { balance: { increment: price } } })
-        // Note: No Wallet History record created, per instruction.
       ]);
 
       if (msgId) {
-        await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_REFUND, { inline_keyboard: [] }).catch(()=>{});
+        await tg.editMessage(chatId, msgId, M.OTP_TIMEOUT_REFUND, { inline_keyboard: [] }).catch(()=>{});
       } else {
-        await tg.sendMessage(chatId, MSG.OTP_TIMEOUT_REFUND).catch(()=>{});
+        await tg.sendMessage(chatId, M.OTP_TIMEOUT_REFUND).catch(()=>{});
       }
     } else {
-      // At least 1 OTP received, strictly marking order COMPLETED (expired state for >=1 OTP) with no refund
       await prisma.order.update({ where: { id: orderId }, data: { status: 'COMPLETED' } });
       
       if (msgId) {
-        await tg.editMessage(chatId, msgId, MSG.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] }).catch(()=>{});
+        await tg.editMessage(chatId, msgId, M.OTP_TIMEOUT_NO_REFUND, { inline_keyboard: [] }).catch(()=>{});
       } else {
-        await tg.sendMessage(chatId, MSG.OTP_TIMEOUT_NO_REFUND).catch(()=>{});
+        await tg.sendMessage(chatId, M.OTP_TIMEOUT_NO_REFUND).catch(()=>{});
       }
     }
   } catch (error) { console.error(`[POLLING ERR] Order: ${orderId}`, error); }
@@ -351,6 +382,8 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
 // ==========================================
 
 async function handleUpdate(update) {
+  const M = await getMessages();
+
   // --- MESSAGE ROUTER ---
   if (update.message) {
     const msg = update.message;
@@ -360,17 +393,32 @@ async function handleUpdate(update) {
 
     const admin = await isAdmin(userId);
 
-    // Handle Photos (Payment Screenshots)
+    // Handle Photos (QR Code Upload or Payment Screenshots)
     if (msg.photo?.length > 0) {
       if (!(await verifyAccess(chatId, userId))) return;
 
+      // Handle QR Code upload for admin
+      if (admin && msg.reply_to_message?.text?.includes('Send the QR Code image')) {
+        const photoId = msg.photo[msg.photo.length - 1].file_id;
+        const pSet = await getPaymentSettings();
+        pSet.qrFileId = photoId;
+        await savePaymentSettings(pSet);
+        return await tg.sendMessage(chatId, '✅ QR Code updated successfully.', { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
+      }
+
+      // Normal payment logic
       const amountStr = msg.caption ? msg.caption.trim() : '';
       const amount = Number(amountStr);
 
       if (!amountStr || isNaN(amount) || amount <= 0) {
         server.log.error(`[PAYMENT ERROR] Missing or invalid amount in photo caption for user ${userId}`);
-        await tg.sendMessage(chatId, MSG.PAYMENT_CAPTION_ERROR);
+        await tg.sendMessage(chatId, M.PAYMENT_CAPTION_ERROR);
         return;
+      }
+      
+      const pSet = await getPaymentSettings();
+      if (amount < pSet.minDeposit) {
+        return await tg.sendMessage(chatId, `❌ The minimum deposit amount is ₹${pSet.minDeposit}.`);
       }
 
       const u = await getUser(userId);
@@ -391,7 +439,7 @@ async function handleUpdate(update) {
         const caption = `💳 <b>New Payment Request</b>\n\n🆔 <b>User ID:</b> <code>${userId}</code>\n🧾 <b>Payment ID:</b> <code>${p.id}</code>\n💰 <b>Amount:</b> <code>₹${amount}</code>`;
         await tg.sendPhoto(aId, photoId, { caption, reply_markup: KB.approveReject(p.id, userId) });
       }
-      return await tg.sendMessage(chatId, MSG.PAYMENT_SUBMITTED);
+      return await tg.sendMessage(chatId, M.PAYMENT_SUBMITTED);
     }
 
     if (!msg.text) return;
@@ -400,6 +448,39 @@ async function handleUpdate(update) {
     // Handle Admin ForceReplies
     if (admin && msg.reply_to_message?.text) {
       const promptText = msg.reply_to_message.text;
+
+      if (promptText.includes('Enter new UPI ID:')) {
+        const pSet = await getPaymentSettings();
+        pSet.upiId = txt;
+        await savePaymentSettings(pSet);
+        return await tg.sendMessage(chatId, `✅ UPI ID updated to <code>${esc(txt)}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
+      }
+
+      if (promptText.includes('Enter Minimum Deposit amount:')) {
+        const amt = Number(txt);
+        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.', { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
+        const pSet = await getPaymentSettings();
+        pSet.minDeposit = amt;
+        await savePaymentSettings(pSet);
+        return await tg.sendMessage(chatId, `✅ Minimum Deposit updated to <code>₹${amt}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
+      }
+
+      if (promptText.includes('Enter new message for')) {
+        const keyMatch = promptText.match(/\[KEY:\s*(\w+)\]/);
+        if (!keyMatch) return;
+        const key = keyMatch[1];
+        
+        const dbMsgs = await prisma.setting.findUnique({ where: { key: 'CUSTOM_MESSAGES' } });
+        const customMsgs = dbMsgs ? JSON.parse(dbMsgs.value) : {};
+        customMsgs[key] = txt; 
+        
+        await prisma.setting.upsert({
+           where: { key: 'CUSTOM_MESSAGES' },
+           update: { value: JSON.stringify(customMsgs) },
+           create: { key: 'CUSTOM_MESSAGES', value: JSON.stringify(customMsgs) }
+        });
+        return await tg.sendMessage(chatId, `✅ Message for <b>${key}</b> updated.`, { inline_keyboard: [[BTN.inline("🔙 Back to Editor", "msg_editor")]] });
+      }
 
       if (promptText.includes('Enter broadcast message:')) {
         const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
@@ -554,7 +635,7 @@ async function handleUpdate(update) {
           const existingRef = await prisma.referral.findUnique({ where: { referredId: userInDb.id } });
           if (!existingRef && !pendingReferrals.has(userId)) {
             pendingReferrals.set(userId, payload);
-            await tg.sendMessage(payload, MSG.REF_PENDING).catch(()=>{});
+            await tg.sendMessage(payload, M.REF_PENDING).catch(()=>{});
           }
         }
       }
@@ -566,7 +647,7 @@ async function handleUpdate(update) {
         pendingReferrals.delete(userId);
       }
 
-      return await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
+      return await tg.sendMessage(chatId, M.WELCOME, admin ? KB.adminMain : KB.main);
     }
 
     if (!(await verifyAccess(chatId, userId))) return;
@@ -575,14 +656,14 @@ async function handleUpdate(update) {
       case '🐦 Get Twitter Number':
         const uBuy = await getUser(userId);
         const act = await prisma.order.findFirst({ where: { userId: uBuy.id, status: 'ACTIVE' } });
-        if (act) return await tg.sendMessage(chatId, MSG.PLEASE_WAIT);
+        if (act) return await tg.sendMessage(chatId, M.PLEASE_WAIT);
         
         const smsSet = await getSmsSettings();
-        if (uBuy.balance.toNumber() < smsSet.maxPrice) return await tg.sendMessage(chatId, MSG.NO_BALANCE);
+        if (uBuy.balance.toNumber() < smsSet.maxPrice) return await tg.sendMessage(chatId, M.NO_BALANCE);
         
-        const loadMsg = await tg.sendMessage(chatId, MSG.PURCHASING);
+        const loadMsg = await tg.sendMessage(chatId, M.PURCHASING);
         const pr = await purchaseSms(smsSet);
-        if (!pr.success) return await tg.editMessage(chatId, loadMsg?.message_id, MSG.NUMBER_FAILED);
+        if (!pr.success) return await tg.editMessage(chatId, loadMsg?.message_id, M.NUMBER_FAILED);
 
         try {
           const ord = await prisma.$transaction(async (tx) => {
@@ -610,7 +691,7 @@ async function handleUpdate(update) {
 
           let rawPhone = pr.phoneNumber.toString().replace(/^\+?1?\s*/, '');
 
-          const successMsg = MSG.NUMBER_SUCCESS
+          const successMsg = M.NUMBER_SUCCESS
             .replace('{phoneNumber}', esc(rawPhone))
             .replace('{amount}', smsSet.maxPrice);
 
@@ -618,14 +699,14 @@ async function handleUpdate(update) {
           startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg?.message_id, smsSet.interval);
         } catch (err) {
           await cancelSms(pr.activationId);
-          if (err.message === 'INSUFFICIENT_BALANCE') return await tg.editMessage(chatId, loadMsg?.message_id, MSG.NO_BALANCE);
-          return await tg.editMessage(chatId, loadMsg?.message_id, MSG.NUMBER_FAILED);
+          if (err.message === 'INSUFFICIENT_BALANCE') return await tg.editMessage(chatId, loadMsg?.message_id, M.NO_BALANCE);
+          return await tg.editMessage(chatId, loadMsg?.message_id, M.NUMBER_FAILED);
         }
         break;
 
       case '👤 My Account':
         const uAcc = await getUser(userId);
-        const textAcc = MSG.MY_ACCOUNT.replace('{userId}', userId).replace('{firstName}', esc(uAcc.firstName||'')).replace('{username}', esc(uAcc.username?'@'+uAcc.username:'')).replace('{balance}', esc(uAcc.balance)).replace('{referrals}', uAcc.totalReferrals).replace('{date}', new Date(uAcc.createdAt).toLocaleDateString('en-IN'));
+        const textAcc = M.MY_ACCOUNT.replace('{userId}', userId).replace('{firstName}', esc(uAcc.firstName||'')).replace('{username}', esc(uAcc.username?'@'+uAcc.username:'')).replace('{balance}', esc(uAcc.balance)).replace('{referrals}', uAcc.totalReferrals).replace('{date}', new Date(uAcc.createdAt).toLocaleDateString('en-IN'));
         await tg.sendMessage(chatId, textAcc);
         break;
 
@@ -639,28 +720,36 @@ async function handleUpdate(update) {
           take: 10, 
           orderBy: { createdAt: 'desc' } 
         });
-        if (!txs.length) return await tg.sendMessage(chatId, MSG.WALLET_EMPTY);
+        if (!txs.length) return await tg.sendMessage(chatId, M.WALLET_EMPTY);
         let hTxt = "📜 <b>Wallet History</b>\n\n";
         txs.forEach(t => hTxt += `📅 <b>${new Date(t.createdAt).toLocaleDateString('en-IN')}</b>\n🔹 <b>Type:</b> ${esc(t.type)}\n💰 <b>Amount:</b> <code>${t.amount>0?'+':''}${esc(t.amount)}</code>\n📝 <b>Note:</b> <i>${esc(t.description)}</i>\n\n`);
         await tg.sendMessage(chatId, hTxt);
         break;
 
       case '💳 Add Balance':
-        const sUpi = await getSysSettings();
-        await tg.sendMessage(chatId, MSG.PAYMENT_INSTRUCT.replace('{upi}', esc(sUpi?.upiId || 'Skywardstudio@ybl')));
+        const pSet = await getPaymentSettings();
+        const addBalTxt = M.ADD_BALANCE
+           .replace('{upi}', esc(pSet.upiId))
+           .replace('{minimumDeposit}', pSet.minDeposit);
+           
+        if (pSet.qrFileId) {
+           await tg.sendPhoto(chatId, pSet.qrFileId, { caption: addBalTxt });
+        } else {
+           await tg.sendMessage(chatId, addBalTxt);
+        }
         break;
 
       case '🎁 Refer & Earn':
         const uRef = await getUser(userId);
         const sysRef = await getSysSettings();
         const rLink = `https://t.me/${CONFIG.telegram.botUsername}?start=${userId}`;
-        const rTxt = MSG.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0.5)).replace('{referralLink}', esc(rLink)) + `\n\n📊 <b>Your Stats</b>\n👥 <b>Referrals:</b> <code>${uRef.totalReferrals}</code>\n💰 <b>Earnings:</b> <code>₹${esc(uRef.referralEarnings)}</code>`;
+        const rTxt = M.REFER_INFO.replace('{amount}', esc(sysRef?.referralBonus || 0.5)).replace('{referralLink}', esc(rLink)) + `\n\n📊 <b>Your Stats</b>\n👥 <b>Referrals:</b> <code>${uRef.totalReferrals}</code>\n💰 <b>Earnings:</b> <code>₹${esc(uRef.referralEarnings)}</code>`;
         await tg.sendMessage(chatId, rTxt);
         break;
 
       case '📞 Support':
         const sSup = await getSysSettings();
-        await tg.sendMessage(chatId, MSG.SUPPORT, KB.support(sSup?.supportUsername || CONFIG.telegram.supportUsername));
+        await tg.sendMessage(chatId, M.SUPPORT, KB.support(sSup?.supportUsername || CONFIG.telegram.supportUsername));
         break;
 
       case '📊 Statistics':
@@ -749,7 +838,7 @@ async function handleUpdate(update) {
             await processReferral(userId, pendingReferrals.get(userId));
             pendingReferrals.delete(userId);
           }
-          await tg.sendMessage(chatId, MSG.WELCOME, admin ? KB.adminMain : KB.main);
+          await tg.sendMessage(chatId, M.WELCOME, admin ? KB.adminMain : KB.main);
         } else {
           // Replaced answerCallbackQuery with sendMessage to prevent duplicate answer errors
           await tg.sendMessage(chatId, "❌ Please join BOTH the Channel and the Group to continue.");
@@ -759,7 +848,7 @@ async function handleUpdate(update) {
       case 'cancel_order':
         const uCan = await getUser(userId);
         const oCan = await prisma.order.findFirst({ where: { userId: uCan.id, status: 'ACTIVE', activationId: args[0] } });
-        if (!oCan) return await tg.editMessage(chatId, msgId, MSG.UNKNOWN_ERROR, { inline_keyboard: [] });
+        if (!oCan) return await tg.editMessage(chatId, msgId, M.UNKNOWN_ERROR, { inline_keyboard: [] });
         
         await cancelSms(args[0]);
 
@@ -768,10 +857,10 @@ async function handleUpdate(update) {
             prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } }),
             prisma.user.update({ where: { id: uCan.id }, data: { balance: { increment: oCan.price } } })
           ]);
-          await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED_REFUND, { inline_keyboard: [] });
+          await tg.editMessage(chatId, msgId, M.ORDER_CANCELLED_REFUND, { inline_keyboard: [] });
         } else {
           await prisma.order.update({ where: { id: oCan.id }, data: { status: 'CANCELLED' } });
-          await tg.editMessage(chatId, msgId, MSG.ORDER_CANCELLED_NO_REFUND, { inline_keyboard: [] });
+          await tg.editMessage(chatId, msgId, M.ORDER_CANCELLED_NO_REFUND, { inline_keyboard: [] });
         }
         break;
 
@@ -803,7 +892,7 @@ async function handleUpdate(update) {
 
         await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
         await tg.sendMessage(chatId, `✅ Payment <code>${pId}</code> processed. Added <code>₹${amt}</code> to User <code>${args[1]}</code>.`);
-        await tg.sendMessage(targetTgId.toString(), MSG.PAYMENT_APPROVED.replace('{amount}', esc(amt)));
+        await tg.sendMessage(targetTgId.toString(), M.PAYMENT_APPROVED.replace('{amount}', esc(amt)));
         break;
 
       case 'reject_payment':
@@ -811,7 +900,7 @@ async function handleUpdate(update) {
         await prisma.payment.update({ where: { id: args[0] }, data: { status: 'REJECTED' } });
         await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
         await tg.sendMessage(chatId, `❌ Payment <code>${args[0]}</code> Rejected.`);
-        await tg.sendMessage(args[1], MSG.PAYMENT_REJECTED);
+        await tg.sendMessage(args[1], M.PAYMENT_REJECTED);
         break;
 
       case 'admin_users_menu':
@@ -914,6 +1003,63 @@ async function handleUpdate(update) {
         await tg.editMessage(chatId, msgId, "⚙️ <b>System Settings</b>", KB.adminSettings());
         break;
         
+      case 'pay_settings':
+        if (!admin) return;
+        await tg.editMessage(chatId, msgId, "💳 <b>Payment Settings</b>\n\nConfigure UPI, QR code, and minimum deposit.", {
+          inline_keyboard: [
+            [BTN.inline("🖼 Upload QR Code", "pay_set_qr"), BTN.inline("🏦 Change UPI ID", "pay_set_upi")],
+            [BTN.inline("💵 Minimum Deposit", "pay_set_min"), BTN.inline("👀 Preview Payment", "pay_preview")],
+            [BTN.inline("🔙 Back", "admin_settings")]
+          ]
+        });
+        break;
+        
+      case 'pay_set_qr':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '🖼 Send the QR Code image to save it in the database:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+        
+      case 'pay_set_upi':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '🏦 Enter new UPI ID:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+        
+      case 'pay_set_min':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '💵 Enter Minimum Deposit amount:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+        
+      case 'pay_preview':
+        if (!admin) return;
+        const previewSet = await getPaymentSettings();
+        const previewTxt = M.ADD_BALANCE
+           .replace('{upi}', esc(previewSet.upiId))
+           .replace('{minimumDeposit}', previewSet.minDeposit);
+        
+        if (previewSet.qrFileId) {
+           await tg.sendPhoto(chatId, previewSet.qrFileId, { caption: previewTxt });
+        } else {
+           await tg.sendMessage(chatId, previewTxt);
+        }
+        break;
+        
+      case 'msg_editor':
+        if (!admin) return;
+        await tg.editMessage(chatId, msgId, "💬 <b>Message Editor</b>\n\nSelect a message to edit. Using variables like {upi} is supported where applicable.", KB.messageEditor());
+        break;
+        
+      case 'edit_msg':
+        if (!admin) return;
+        const key = args[0];
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        const currentMsg = M[key] || MSG[key];
+        await tg.sendMessage(chatId, `Current message:\n\n${currentMsg}`);
+        await tg.sendMessage(chatId, `📝 Enter new message for ${key}:\n(You can use HTML tags)\n\n[KEY: ${key}]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
       case 'admin_bypass':
         if (!admin) return;
         const bUsers = await getBypassUsers();
@@ -1128,6 +1274,10 @@ async function setupWebhookWithRetry(baseUrl, secret, maxRetries = 5) {
 const start = async () => {
   try {
     await prisma.$connect();
+    
+    // Trigger message database initialization on boot
+    await getMessages();
+
     const host = CONFIG.server.host || '0.0.0.0';
     await server.listen({ port: CONFIG.server.port, host });
     server.log.info(`[SERVER] 🚀 Running on http://${host}:${CONFIG.server.port}`);
