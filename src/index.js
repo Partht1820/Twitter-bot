@@ -277,7 +277,10 @@ async function checkForceJoin(userId) {
          if (!['creator', 'administrator', 'member', 'restricted'].includes(g?.status)) return false;
       }
       return true;
-    } catch(e) { return false; }
+    } catch(e) { 
+      console.error(`[FORCE JOIN RESELLER ERROR] Channel: ${r.channel} | Group: ${r.group} | Error:`, e.message);
+      return false; 
+    }
   }
 
   const sys = await getSysSettings();
@@ -440,28 +443,22 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
 
         await tg.sendMessage(chatId, M.OTP_RECEIVED.replace('{count}', otpsReceived).replace('{otp}', esc(code)));
 
-        // --- RESELLER PROFIT LOGIC ---
+        // --- RESELLER PROFIT LOGIC (UPDATED) ---
         if (otpsReceived === 1) {
            const rDataApprove = await getResellerData();
-           const rId = rDataApprove.users[chatId]; // chatId is the user's tgId as string
+           const rId = rDataApprove.users[chatId];
            if (rId && rDataApprove.resellers[rId] && rDataApprove.resellers[rId].active) {
-              const currentBase = (await getSmsSettings()).maxPrice;
-              const userPaid = order.price;
-              const profit = Math.max(0, userPaid - currentBase);
-              
-              if (profit > 0 || userPaid >= currentBase) {
-                 rDataApprove.resellers[rId].pending += profit;
-                 rDataApprove.resellers[rId].earned += profit;
-                 if (!rDataApprove.stats[rId]) rDataApprove.stats[rId] = {joined:0, deposits:0, sales:0};
-                 rDataApprove.stats[rId].sales += 1;
-                 await saveResellerData(rDataApprove);
-                 
-                 const ptUser = await prisma.user.findUnique({ where: { id: userDbId } });
-                 const username = ptUser?.username ? `@${ptUser.username}` : ptUser?.telegramId.toString();
-                 
-                 const resMsg = `🎉 <b>New Sale</b>\n\n👤 <b>User:</b>\n${esc(username)}\n\n💰 <b>Purchase Price:</b>\n₹${userPaid.toFixed(2)}\n\n📈 <b>Your Profit:</b>\n₹${profit.toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${rDataApprove.resellers[rId].pending.toFixed(2)}`;
-                 await tg.sendMessage(rId, resMsg).catch(()=>{});
-              }
+              // Sirf sale count hogi, balance nahi judega kyunki deposit pe mil chuka hai
+              if (!rDataApprove.stats[rId]) rDataApprove.stats[rId] = {joined:0, deposits:0, sales:0};
+              rDataApprove.stats[rId].sales += 1;
+              await saveResellerData(rDataApprove);
+
+              const ptUser = await prisma.user.findUnique({ where: { id: userDbId } });
+              const username = ptUser?.username ? `@${ptUser.username}` : ptUser?.telegramId.toString();
+
+              // Notification for sale
+              const resMsg = `📦 <b>New Sale Made</b>\n\n👤 <b>User:</b>\n${esc(username)}\n\n💰 <b>Number Price:</b>\n₹${order.price.toFixed(2)}\n\n<i>(Profit was already credited to you when this user deposited balance)</i>`;
+              await tg.sendMessage(rId, resMsg).catch(()=>{});
            }
         }
         // ------------------------------
@@ -1302,8 +1299,8 @@ async function handleUpdate(update) {
           }
           await tg.sendMessage(chatId, M.WELCOME, admin ? KB.adminMain : KB.main(isPart, isRes));
         } else {
-          // Replaced answerCallbackQuery with sendMessage to prevent duplicate answer errors
-          await tg.sendMessage(chatId, "❌ Please join BOTH the Channel and the Group to continue.");
+          // Changed text from "BOTH the Channel and the Group" to "the required Channel/Group"
+          await tg.sendMessage(chatId, "❌ Please join the required Channel/Group to continue.");
         }
         break;
 
@@ -1374,13 +1371,38 @@ async function handleUpdate(update) {
         }
 
         // ==========================================
-        // RESELLER DEPOSIT LOGIC
+        // RESELLER DEPOSIT LOGIC (₹1 FIXED BASE PRICE)
         // ==========================================
         const rDataDep = await getResellerData();
         const rDepId = rDataDep.users[ptIdStr];
         if (rDepId && rDataDep.resellers[rDepId] && rDataDep.resellers[rDepId].active) {
+           const myReseller = rDataDep.resellers[rDepId];
+           
+           // Reseller ka set kiya hua number price
+           const userPaidPrice = myReseller.price; 
+           
+           // Fixed Base Price = ₹1 (Iske upar sab reseller ka profit)
+           const basePrice = 1;
+           const profitMargin = Math.max(0, userPaidPrice - basePrice);
+           let profitOnDeposit = 0;
+           
+           if (profitMargin > 0 && userPaidPrice > 0) {
+               // Total deposit me se advance profit nikalna
+               const profitRatio = profitMargin / userPaidPrice;
+               profitOnDeposit = amt * profitRatio;
+           }
+
            if (!rDataDep.stats[rDepId]) rDataDep.stats[rDepId] = { joined: 0, deposits: 0, sales: 0 };
            rDataDep.stats[rDepId].deposits += amt;
+
+           if (profitOnDeposit > 0) {
+               myReseller.pending += profitOnDeposit;
+               myReseller.earned += profitOnDeposit;
+               
+               // Reseller ko turant notification
+               await tg.sendMessage(rDepId, `🎉 <b>Reseller Commission</b>\n\nA referred user deposited ₹${amt}.\n💰 You earned: <code>₹${profitOnDeposit.toFixed(2)}</code>`).catch(()=>{});
+           }
+           
            await saveResellerData(rDataDep);
         }
 
