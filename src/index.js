@@ -70,7 +70,7 @@ const KB = {
       [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}]
     ];
     if (isPartner) kb.push([{text: "🤝 Partner Panel"}]);
-    return { keyboard: kb, resize_keyboard: true, is_persistent: true };
+    return { keyboard: kb, resize_keyboard: true, is_persistent: true },
   },
   adminMain: { keyboard: [
     [{text: "🐦 Get Twitter Number"}, {text: "👤 My Account"}], 
@@ -1422,9 +1422,16 @@ async function handleUpdate(update) {
         await tg.editMessage(chatId, msgId, pDetMsg, {
            inline_keyboard: [
              [BTN.inline("💸 Mark Paid", `admin_pay_partner:${dtId}`), BTN.inline(myPP.active ? "❌ Disable Partner" : "✅ Enable Partner", `admin_tog_partner:${dtId}`)],
-             [BTN.inline("🔙 Back", "admin_view_partners")]
+             [BTN.inline("✏️ Change UPI", `admin_upi_partner:${dtId}`), BTN.inline("🔙 Back", "admin_view_partners")]
            ]
         });
+        break;
+
+      case 'admin_upi_partner':
+        if (!admin) return;
+        const uIdUpi = args[0];
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `🏦 Enter new UPI for Partner ${uIdUpi}:\n[KEY_PART_UPI_ADMIN:${uIdUpi}]`, { reply_markup: { force_reply: true, selective: true } });
         break;
 
       case 'admin_pay_partner':
@@ -1437,7 +1444,6 @@ async function handleUpdate(update) {
            await savePartnerData(payD);
            await tg.answerCallbackQuery(cb.id, { text: "✅ Partner pending balance marked as Paid.", show_alert: true }).catch(()=>{});
            
-           // refresh details UI by simulating callback
            update.callback_query.data = `admin_view_partner_det:${payId}`;
            return handleUpdate(update);
         } else {
@@ -1457,7 +1463,6 @@ async function handleUpdate(update) {
         }
         break;
 
-      // ================= PARTNER PANEL CALLBACKS =================
       case 'part_panel':
         if (!isPart) return;
         await tg.editMessage(chatId, msgId, "🤝 <b>Partner Panel</b>\n\nSelect an option below:", {
