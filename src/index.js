@@ -70,7 +70,7 @@ const KB = {
       [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}]
     ];
     if (isPartner) kb.push([{text: "🤝 Partner Panel"}]);
-    return { keyboard: kb, resize_keyboard: true, is_persistent: true },
+    return { keyboard: kb, resize_keyboard: true, is_persistent: true };
   },
   adminMain: { keyboard: [
     [{text: "🐦 Get Twitter Number"}, {text: "👤 My Account"}], 
@@ -702,6 +702,18 @@ async function handleUpdate(update) {
             return await tg.sendMessage(chatId, `✅ <b>User removed successfully.</b>\n\nForce Join will now apply to this user again.`, { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
           } else {
             return await tg.sendMessage(chatId, '⚠️ User is not in the bypass list.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+          }
+        }
+
+        if (promptText.includes('Enter new UPI for Partner')) {
+          const keyMatch = promptText.match(/\[KEY_PART_UPI_ADMIN:\s*(\d+)\]/);
+          if (!keyMatch) return;
+          const targetPId = keyMatch[1];
+          const pData = await getPartnerData();
+          if (pData.partners[targetPId]) {
+            pData.partners[targetPId].upi = txt;
+            await savePartnerData(pData);
+            return await tg.sendMessage(chatId, `✅ UPI updated for Partner ${targetPId}: <code>${esc(txt)}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Partners", "admin_partners")]] });
           }
         }
       }
