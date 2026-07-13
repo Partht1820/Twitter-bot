@@ -63,13 +63,14 @@ const MSG = {
 const BTN = { inline: (t, c) => ({text: t, callback_data: c}), url: (t, u) => ({text: t, url: u}) };
 
 const KB = {
-  main: (isPartner) => {
+  main: (isPartner, isReseller) => {
     const kb = [
       [{text: "🐦 Get Twitter Number"}, {text: "👤 My Account"}], 
       [{text: "📜 Wallet History"}, {text: "💳 Add Balance"}], 
       [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}]
     ];
     if (isPartner) kb.push([{text: "🤝 Partner Panel"}]);
+    if (isReseller) kb.push([{text: "👑 Reseller Panel"}]);
     return { keyboard: kb, resize_keyboard: true, is_persistent: true };
   },
   adminMain: { keyboard: [
@@ -78,9 +79,8 @@ const KB = {
     [{text: "🎁 Refer & Earn"}, {text: "📞 Support"}], 
     [{text: "📊 Statistics"}, {text: "👥 Users"}, {text: "💳 Payments"}], 
     [{text: "🛒 Orders"}, {text: "📢 Broadcast"}, {text: "⚙️ Settings"}],
-    [{text: "🤝 Partners"}]
+    [{text: "🤝 Partners"}, {text: "👑 Reseller Management"}]
   ], resize_keyboard: true, is_persistent: true },
-  forceJoin: (c, g) => ({ inline_keyboard: [[BTN.url("📢 Join Channel", `https://t.me/${c.replace("@","")}`)], [BTN.url("👥 Join Group", `https://t.me/${g.replace("@","")}`)], [BTN.inline("✅ I've Joined", "verify_join")]] }),
   cancel: (id) => ({ inline_keyboard: [[BTN.inline("❌ Cancel Number", `cancel_order:${id}`)]] }),
   approveReject: (pId, uId) => ({ inline_keyboard: [[BTN.inline("✅ Approve", `approve_payment:${pId}:${uId}`), BTN.inline("❌ Reject", `reject_payment:${pId}:${uId}`)]] }),
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
@@ -123,6 +123,18 @@ function esc(text) {
     .replace(/>/g, '&gt;');
 }
 
+function getChatIdForApi(val) {
+  if (!val) return null;
+  if (val.includes('t.me/')) {
+      const parts = val.split('t.me/');
+      let id = parts[1].replace(/\//g, '');
+      if (id.startsWith('+') || id.startsWith('joinchat')) return val; 
+      return '@' + id;
+  }
+  if (!val.startsWith('@') && !val.startsWith('-')) return '@' + val;
+  return val;
+}
+
 // ==========================================
 // 3. DATABASE HELPER FUNCTIONS
 // ==========================================
@@ -151,6 +163,23 @@ async function savePartnerData(data) {
     where: { key: 'PARTNER_DATA' },
     update: { value: JSON.stringify(data) },
     create: { key: 'PARTNER_DATA', value: JSON.stringify(data) }
+  });
+}
+
+async function getResellerData() {
+  const s = await prisma.setting.findUnique({ where: { key: 'RESELLER_DATA' } });
+  return s ? JSON.parse(s.value) : {
+    resellers: {}, // { "tgId": { price: 2.50, earned: 0, paid: 0, pending: 0, active: true, upi: "", welcomeMsg: "", channel: "", group: "" } }
+    users: {},     // { "userTgId": "resellerTgId" }
+    stats: {}      // { "resellerTgId": { joined: 0, deposits: 0, sales: 0 } }
+  };
+}
+
+async function saveResellerData(data) {
+  await prisma.setting.upsert({
+    where: { key: 'RESELLER_DATA' },
+    update: { value: JSON.stringify(data) },
+    create: { key: 'RESELLER_DATA', value: JSON.stringify(data) }
   });
 }
 
@@ -230,8 +259,28 @@ async function checkForceJoin(userId) {
   if (await isAdmin(userId)) return true;
   if (await isBypassed(userId)) return true;
   
+  const rData = await getResellerData();
+  const rId = rData.users[userId.toString()];
+
+  if (rId && rData.resellers[rId]) {
+    const r = rData.resellers[rId];
+    if (!r.channel && !r.group) return true;
+    try {
+      if (r.channel) {
+         const cApi = getChatIdForApi(r.channel);
+         const c = await tg.getChatMember(cApi, userId);
+         if (!['creator', 'administrator', 'member', 'restricted'].includes(c?.status)) return false;
+      }
+      if (r.group) {
+         const gApi = getChatIdForApi(r.group);
+         const g = await tg.getChatMember(gApi, userId);
+         if (!['creator', 'administrator', 'member', 'restricted'].includes(g?.status)) return false;
+      }
+      return true;
+    } catch(e) { return false; }
+  }
+
   const sys = await getSysSettings();
-  
   if (sys?.forceJoinEnabled === false) return true;
 
   const channel = sys?.forceJoinChannel || CONFIG.telegram.forceJoinChannel;
@@ -257,9 +306,24 @@ async function verifyAccess(chatId, userId) {
   
   const isJoined = await checkForceJoin(userId);
   if (!isJoined) {
-    const channel = sys?.forceJoinChannel || CONFIG.telegram.forceJoinChannel;
-    const group = sys?.forceJoinGroup || CONFIG.telegram.forceJoinGroup;
-    await tg.sendMessage(chatId, M.FORCE_JOIN, KB.forceJoin(channel, group));
+    let channel, group;
+    const rData = await getResellerData();
+    const rId = rData.users[userId.toString()];
+
+    if (rId && rData.resellers[rId]) {
+       channel = rData.resellers[rId].channel;
+       group = rData.resellers[rId].group;
+    } else {
+       channel = sys?.forceJoinChannel || CONFIG.telegram.forceJoinChannel;
+       group = sys?.forceJoinGroup || CONFIG.telegram.forceJoinGroup;
+    }
+
+    let buttons = [];
+    if (channel) buttons.push([BTN.url("📢 Join Channel", channel.startsWith('http') ? channel : `https://t.me/${channel.replace("@","")}`)]);
+    if (group) buttons.push([BTN.url("👥 Join Group", group.startsWith('http') ? group : `https://t.me/${group.replace("@","")}`)]);
+    buttons.push([BTN.inline("✅ I've Joined", "verify_join")]);
+
+    await tg.sendMessage(chatId, M.FORCE_JOIN, { inline_keyboard: buttons });
     return false;
   }
   return true;
@@ -376,6 +440,32 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
 
         await tg.sendMessage(chatId, M.OTP_RECEIVED.replace('{count}', otpsReceived).replace('{otp}', esc(code)));
 
+        // --- RESELLER PROFIT LOGIC ---
+        if (otpsReceived === 1) {
+           const rDataApprove = await getResellerData();
+           const rId = rDataApprove.users[chatId]; // chatId is the user's tgId as string
+           if (rId && rDataApprove.resellers[rId] && rDataApprove.resellers[rId].active) {
+              const currentBase = (await getSmsSettings()).maxPrice;
+              const userPaid = order.price;
+              const profit = Math.max(0, userPaid - currentBase);
+              
+              if (profit > 0 || userPaid >= currentBase) {
+                 rDataApprove.resellers[rId].pending += profit;
+                 rDataApprove.resellers[rId].earned += profit;
+                 if (!rDataApprove.stats[rId]) rDataApprove.stats[rId] = {joined:0, deposits:0, sales:0};
+                 rDataApprove.stats[rId].sales += 1;
+                 await saveResellerData(rDataApprove);
+                 
+                 const ptUser = await prisma.user.findUnique({ where: { id: userDbId } });
+                 const username = ptUser?.username ? `@${ptUser.username}` : ptUser?.telegramId.toString();
+                 
+                 const resMsg = `🎉 <b>New Sale</b>\n\n👤 <b>User:</b>\n${esc(username)}\n\n💰 <b>Purchase Price:</b>\n₹${userPaid.toFixed(2)}\n\n📈 <b>Your Profit:</b>\n₹${profit.toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${rDataApprove.resellers[rId].pending.toFixed(2)}`;
+                 await tg.sendMessage(rId, resMsg).catch(()=>{});
+              }
+           }
+        }
+        // ------------------------------
+
         try {
           await fetch(buildSmsUrl({ action: 'setStatus', status: 3, id: activationId }));
         } catch (e) {}
@@ -447,6 +537,9 @@ async function handleUpdate(update) {
     const admin = await isAdmin(userId);
     const pDataGlobal = await getPartnerData();
     const isPart = !!pDataGlobal.partners[userId.toString()];
+    
+    const rDataGlobal = await getResellerData();
+    const isRes = !!rDataGlobal.resellers[userId.toString()];
 
     // Handle Photos (QR Code Upload or Payment Screenshots)
     if (msg.photo?.length > 0) {
@@ -530,6 +623,46 @@ async function handleUpdate(update) {
           return await tg.sendMessage(chatId, `✅ <b>Partner Added/Updated!</b>\n\nUser ID: <code>${targetPId}</code>\nCommission: <code>${comm}%</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Partners", "admin_partners")]] });
         }
 
+        if (promptText.includes('Enter Telegram User ID to make them a Reseller:')) {
+          if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_resellers")]] });
+          await tg.sendMessage(chatId, `👑 Enter Starting Number Price for Reseller ${txt}:\n(Minimum: ₹1.00)\n[KEY_RES_PRICE:${txt}]`, { reply_markup: { force_reply: true, selective: true } });
+          return;
+        }
+
+        if (promptText.includes('Enter Starting Number Price for Reseller')) {
+          const keyMatch = promptText.match(/\[KEY_RES_PRICE:\s*(\d+)\]/);
+          if (!keyMatch) return;
+          const targetRId = keyMatch[1];
+          const price = Number(txt);
+          if (isNaN(price) || price < 1) return await tg.sendMessage(chatId, '❌ Invalid price. Minimum allowed is ₹1.00.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_resellers")]] });
+          
+          const resD = await getResellerData();
+          if(!resD.resellers[targetRId]) {
+             resD.resellers[targetRId] = { price: price, earned: 0, paid: 0, pending: 0, active: true, upi: "", welcomeMsg: "", channel: "", group: "" };
+             if(!resD.stats[targetRId]) resD.stats[targetRId] = { joined: 0, deposits: 0, sales: 0 };
+          } else {
+             resD.resellers[targetRId].price = price;
+             resD.resellers[targetRId].active = true;
+          }
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ <b>Reseller Added/Updated!</b>\n\nUser ID: <code>${targetRId}</code>\nPrice: <code>₹${price.toFixed(2)}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Resellers", "admin_resellers")]] });
+        }
+
+        if (promptText.includes('Enter new Number Price for Reseller')) {
+          const keyMatch = promptText.match(/\[KEY_RES_PRICE_EDIT_ADMIN:\s*(\d+)\]/);
+          if (!keyMatch) return;
+          const targetRId = keyMatch[1];
+          const price = Number(txt);
+          if (isNaN(price) || price < 1) return await tg.sendMessage(chatId, '❌ Invalid price. Minimum allowed is ₹1.00.', { inline_keyboard: [[BTN.inline("🔙 Back", `admin_view_reseller_det:${targetRId}`)]] });
+          
+          const resD = await getResellerData();
+          if(resD.resellers[targetRId]) {
+             resD.resellers[targetRId].price = price;
+             await saveResellerData(resD);
+             return await tg.sendMessage(chatId, `✅ <b>Price Updated!</b>\n\nReseller: <code>${targetRId}</code>\nNew Price: <code>₹${price.toFixed(2)}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back", `admin_view_reseller_det:${targetRId}`)]] });
+          }
+        }
+
         if (promptText.includes('Enter new UPI ID:')) {
           const pSet = await getPaymentSettings();
           pSet.upiId = txt;
@@ -565,15 +698,20 @@ async function handleUpdate(update) {
 
         if (promptText.includes('Enter broadcast message:')) {
           const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
-          let sent = 0;
-          await tg.sendMessage(chatId, `⏳ Sending broadcast to ${allUsers.length} users...`);
-          for (const u of allUsers) {
-            try {
-              await tg.sendMessage(u.telegramId.toString(), txt);
-              sent++;
-            } catch (err) {} 
-          }
-          return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
+          await tg.sendMessage(chatId, `⏳ Sending broadcast to ${allUsers.length} users in the background...`);
+
+          (async () => {
+            let sent = 0;
+            for (const u of allUsers) {
+              try {
+                await tg.sendMessage(u.telegramId.toString(), txt);
+                sent++;
+                await new Promise(r => setTimeout(r, 50));
+              } catch (err) {}
+            }
+            await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
+          })();
+          return;
         }
 
         if (promptText.includes('Enter Telegram User ID to manage:')) {
@@ -704,6 +842,18 @@ async function handleUpdate(update) {
             return await tg.sendMessage(chatId, '⚠️ User is not in the bypass list.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
           }
         }
+
+        if (promptText.includes('Enter new UPI for Partner')) {
+          const keyMatch = promptText.match(/\[KEY_PART_UPI_ADMIN:\s*(\d+)\]/);
+          if (!keyMatch) return;
+          const targetPId = keyMatch[1];
+          const pData = await getPartnerData();
+          if (pData.partners[targetPId]) {
+            pData.partners[targetPId].upi = txt;
+            await savePartnerData(pData);
+            return await tg.sendMessage(chatId, `✅ UPI updated for Partner ${targetPId}: <code>${esc(txt)}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Partners", "admin_partners")]] });
+          }
+        }
       }
 
       // Partner replies
@@ -727,37 +877,130 @@ async function handleUpdate(update) {
         const sys = await getSysSettings();
         const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
         if (aId) {
-          const reqMsg = `💸 <b>New Withdrawal Request</b>\n\n👤 <b>Partner ID:</b> <code>${userId}</code>\n💰 <b>Amount:</b> ₹${amt}\n🏦 <b>UPI:</b> <code>${esc(myPP.upi)}</code>`;
+          const reqMsg = `💸 <b>New Partner Withdrawal Request</b>\n\n👤 <b>Partner ID:</b> <code>${userId}</code>\n💰 <b>Amount:</b> ₹${amt}\n🏦 <b>UPI:</b> <code>${esc(myPP.upi)}</code>`;
           await tg.sendMessage(aId, reqMsg, { inline_keyboard: [[BTN.inline("View Partner", `admin_view_partner_det:${userId}`)]] });
         }
         return await tg.sendMessage(chatId, `✅ Withdrawal request for ₹${amt} sent to admin.`);
+      }
+
+      // Reseller replies
+      if (promptText.includes('[KEY_RES_PRICE_EDIT_SELF]')) {
+        const amt = Number(txt);
+        if (isNaN(amt) || amt < 1) return await tg.sendMessage(chatId, '❌ Invalid price. Minimum allowed is ₹1.00.', { inline_keyboard: [[BTN.inline("🔙 Back to Panel", "reseller_panel")]] });
+        const resD = await getResellerData();
+        if (resD.resellers[userId.toString()]) {
+          resD.resellers[userId.toString()].price = amt;
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ <b>Number Price Updated!</b>\n\nNew Price: <code>₹${amt.toFixed(2)}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Panel", "reseller_panel")]] });
+        }
+      }
+
+      if (promptText.includes('[KEY_RES_WELCOME]')) {
+        const resD = await getResellerData();
+        if (resD.resellers[userId.toString()]) {
+          resD.resellers[userId.toString()].welcomeMsg = txt;
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ <b>Custom Welcome Message Saved!</b>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "res_settings")]] });
+        }
+      }
+
+      if (promptText.includes('[KEY_RES_CHANNEL]')) {
+        const resD = await getResellerData();
+        if (resD.resellers[userId.toString()]) {
+          if (txt.toLowerCase() === 'none' || txt.toLowerCase() === 'remove') {
+              resD.resellers[userId.toString()].channel = null;
+          } else {
+              resD.resellers[userId.toString()].channel = txt;
+          }
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ Force Join Channel updated!`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "res_settings")]] });
+        }
+      }
+
+      if (promptText.includes('[KEY_RES_GROUP]')) {
+        const resD = await getResellerData();
+        if (resD.resellers[userId.toString()]) {
+          if (txt.toLowerCase() === 'none' || txt.toLowerCase() === 'remove') {
+              resD.resellers[userId.toString()].group = null;
+          } else {
+              resD.resellers[userId.toString()].group = txt;
+          }
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ Force Join Group updated!`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "res_settings")]] });
+        }
+      }
+
+      if (promptText.includes('[KEY_RES_UPI_SELF]')) {
+        const resD = await getResellerData();
+        if (resD.resellers[userId.toString()]) {
+          resD.resellers[userId.toString()].upi = txt;
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ UPI ID saved: <code>${esc(txt)}</code>\n\nYou can now request a withdrawal from the Reseller Panel.`, { inline_keyboard: [[BTN.inline("🔙 Back to Panel", "reseller_panel")]] });
+        }
+      }
+
+      if (promptText.includes('[KEY_RES_WITHDRAW]')) {
+        const amt = Number(txt);
+        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
+        const resD = await getResellerData();
+        const myRes = resD.resellers[userId.toString()];
+        if (!myRes) return;
+        if (amt > (myRes.pending || 0)) return await tg.sendMessage(chatId, `❌ Insufficient pending balance. Your available balance is ₹${(myRes.pending || 0).toFixed(2)}.`, { inline_keyboard: [[BTN.inline("🔙 Back", "reseller_panel")]] });
+        
+        const sys = await getSysSettings();
+        const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
+        if (aId) {
+          const reqMsg = `💸 <b>New Reseller Withdrawal Request</b>\n\n👑 <b>Reseller ID:</b> <code>${userId}</code>\n💰 <b>Amount:</b> ₹${amt}\n🏦 <b>UPI:</b> <code>${esc(myRes.upi)}</code>`;
+          await tg.sendMessage(aId, reqMsg, { inline_keyboard: [[BTN.inline("View Reseller", `admin_view_reseller_det:${userId}`)]] });
+        }
+        return await tg.sendMessage(chatId, `✅ Withdrawal request for ₹${amt} sent to admin.`, { inline_keyboard: [[BTN.inline("🔙 Back to Panel", "reseller_panel")]] });
       }
     }
 
     if (txt.startsWith('/start')) {
       const payload = txt.split(' ')[1];
-      await getUser(userId); // Ensure user is created/fetched first
+      
+      let isNewUser = false;
+      let userInDb = await prisma.user.findUnique({ where: { telegramId: BigInt(userId) } });
+      if (!userInDb) {
+        isNewUser = true;
+        userInDb = await prisma.user.create({ data: { telegramId: BigInt(userId) } });
+      }
 
       if (payload) {
         if (payload.startsWith('p_')) {
           const pTgId = payload.replace('p_', '');
-          const pData = await getPartnerData();
-          if (pData.partners[pTgId] && pTgId !== String(userId)) {
-            if (!pData.users[String(userId)]) {
-              pData.users[String(userId)] = pTgId;
-              if(!pData.stats[pTgId]) pData.stats[pTgId] = { joined: 0, deposits: 0 };
-              pData.stats[pTgId].joined += 1;
-              await savePartnerData(pData);
+          if (isNewUser && pTgId !== String(userId)) {
+            const pData = await getPartnerData();
+            if (pData.partners[pTgId]) {
+              if (!pData.users[String(userId)]) {
+                pData.users[String(userId)] = pTgId;
+                if(!pData.stats[pTgId]) pData.stats[pTgId] = { joined: 0, deposits: 0 };
+                pData.stats[pTgId].joined += 1;
+                await savePartnerData(pData);
+                
+                await tg.sendMessage(pTgId, `🎉 <b>New Partner Referral</b>\n\nA new user has joined using your link!\nThey are now permanently linked to your account.`).catch(()=>{});
+              }
+            }
+          }
+        } else if (payload.startsWith('r_')) {
+          const rTgId = payload.replace('r_', '');
+          if (isNewUser && rTgId !== String(userId)) {
+            const rData = await getResellerData();
+            if (rData.resellers[rTgId]) {
+              if (!rData.users[String(userId)]) {
+                rData.users[String(userId)] = rTgId;
+                if(!rData.stats[rTgId]) rData.stats[rTgId] = { joined: 0, deposits: 0, sales: 0 };
+                rData.stats[rTgId].joined += 1;
+                await saveResellerData(rData);
+              }
             }
           }
         } else if (/^\d+$/.test(payload) && payload !== String(userId)) {
-          const userInDb = await prisma.user.findUnique({ where: { telegramId: BigInt(userId) } });
-          if (userInDb) {
-            const existingRef = await prisma.referral.findUnique({ where: { referredId: userInDb.id } });
-            if (!existingRef && !pendingReferrals.has(userId)) {
-              pendingReferrals.set(userId, payload);
-              await tg.sendMessage(payload, M.REF_PENDING).catch(()=>{});
-            }
+          const existingRef = await prisma.referral.findUnique({ where: { referredId: userInDb.id } });
+          if (!existingRef && !pendingReferrals.has(userId) && isNewUser) {
+            pendingReferrals.set(userId, payload);
+            await tg.sendMessage(payload, M.REF_PENDING).catch(()=>{});
           }
         }
       }
@@ -769,7 +1012,17 @@ async function handleUpdate(update) {
         pendingReferrals.delete(userId);
       }
 
-      return await tg.sendMessage(chatId, M.WELCOME, admin ? KB.adminMain : KB.main(isPart));
+      let welcomeMsg = M.WELCOME;
+      const rDataFetch = await getResellerData();
+      const myMappedReseller = rDataFetch.users[userId.toString()];
+      if (myMappedReseller) {
+         const resInfo = rDataFetch.resellers[myMappedReseller];
+         if (resInfo && resInfo.welcomeMsg) {
+             welcomeMsg = resInfo.welcomeMsg;
+         }
+      }
+
+      return await tg.sendMessage(chatId, welcomeMsg, admin ? KB.adminMain : KB.main(isPart, isRes));
     }
 
     if (!(await verifyAccess(chatId, userId))) return;
@@ -780,8 +1033,16 @@ async function handleUpdate(update) {
         const act = await prisma.order.findFirst({ where: { userId: uBuy.id, status: 'ACTIVE' } });
         if (act) return await tg.sendMessage(chatId, M.ACTIVE_ORDER_EXISTS || MSG.ACTIVE_ORDER_EXISTS);
         
+        const rDataGlobalTx = await getResellerData();
+        const myResellerId = rDataGlobalTx.users[userId.toString()];
         const smsSet = await getSmsSettings();
-        if (uBuy.balance.toNumber() < smsSet.maxPrice) return await tg.sendMessage(chatId, M.NO_BALANCE);
+        let userPrice = smsSet.maxPrice;
+
+        if (myResellerId && rDataGlobalTx.resellers[myResellerId] && rDataGlobalTx.resellers[myResellerId].active) {
+            userPrice = rDataGlobalTx.resellers[myResellerId].price;
+        }
+        
+        if (uBuy.balance.toNumber() < userPrice) return await tg.sendMessage(chatId, M.NO_BALANCE);
         
         const loadMsg = await tg.sendMessage(chatId, M.PURCHASING);
         const pr = await purchaseSms(smsSet);
@@ -790,11 +1051,11 @@ async function handleUpdate(update) {
         try {
           const ord = await prisma.$transaction(async (tx) => {
             const currentUser = await tx.user.findUnique({ where: { id: uBuy.id } });
-            if (currentUser.balance.toNumber() < smsSet.maxPrice) throw new Error('INSUFFICIENT_BALANCE');
+            if (currentUser.balance.toNumber() < userPrice) throw new Error('INSUFFICIENT_BALANCE');
             
             await tx.user.update({
               where: { id: uBuy.id },
-              data: { balance: { decrement: smsSet.maxPrice } }
+              data: { balance: { decrement: userPrice } }
             });
             
             return await tx.order.create({
@@ -804,7 +1065,7 @@ async function handleUpdate(update) {
                 phoneNumber: pr.phoneNumber,
                 service: String(smsSet.serviceId),
                 provider: 'API',
-                price: smsSet.maxPrice,
+                price: userPrice, // Store the price paid by user
                 expiresAt: new Date(Date.now() + (15 * 60 * 1000)), // Strict 15 min expiry tracking
                 status: 'ACTIVE'
               }
@@ -815,10 +1076,10 @@ async function handleUpdate(update) {
 
           const successMsg = M.NUMBER_SUCCESS
             .replace('{phoneNumber}', esc(rawPhone))
-            .replace('{amount}', smsSet.maxPrice);
+            .replace('{amount}', userPrice.toFixed(2));
 
           await tg.editMessage(chatId, loadMsg?.message_id, successMsg, KB.cancel(pr.activationId));
-          startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, smsSet.maxPrice, loadMsg?.message_id, smsSet.interval);
+          startOtpPolling(chatId, uBuy.id, ord.id, pr.activationId, pr.phoneNumber, userPrice, loadMsg?.message_id, smsSet.interval);
         } catch (err) {
           await cancelSms(pr.activationId);
           if (err.message === 'INSUFFICIENT_BALANCE') return await tg.editMessage(chatId, loadMsg?.message_id, M.NO_BALANCE);
@@ -881,6 +1142,20 @@ async function handleUpdate(update) {
             [BTN.inline("🔗 My Referral Link", "part_link")],
             [BTN.inline("📊 Statistics", "part_stats"), BTN.inline("💰 Earnings", "part_earn")],
             [BTN.inline("💸 Withdraw", "part_with")]
+          ]
+        });
+        break;
+
+      case '👑 Reseller Panel':
+        if (!isRes) return;
+        await tg.sendMessage(chatId, "👑 <b>Reseller Panel</b>\n\nSelect an option below:", {
+          inline_keyboard: [
+            [BTN.inline("🔗 My Referral Link", "res_link")],
+            [BTN.inline("📊 Statistics", "res_stats")],
+            [BTN.inline("💵 My Number Price", "res_price"), BTN.inline("✏️ Change Price", "res_edit_price")],
+            [BTN.inline("🏦 Edit UPI", "res_upi"), BTN.inline("💸 Withdraw", "res_with")],
+            [BTN.inline("⚙️ My Settings", "res_settings")],
+            [BTN.inline("⬅️ Back", "close_res_panel")]
           ]
         });
         break;
@@ -962,6 +1237,17 @@ async function handleUpdate(update) {
           ]
         });
         break;
+
+      case '👑 Reseller Management':
+        if (!admin) return;
+        await tg.sendMessage(chatId, "👑 <b>Reseller Management</b>\n\nManage resellers and view their statistics.", {
+          inline_keyboard: [
+            [BTN.inline("➕ Add Reseller", "admin_add_reseller")],
+            [BTN.inline("📋 Reseller List", "admin_view_resellers")],
+            [BTN.inline("🔙 Back", "back_to_admin")]
+          ]
+        });
+        break;
     }
   }
 
@@ -1002,6 +1288,8 @@ async function handleUpdate(update) {
     const admin = await isAdmin(userId);
     const pDataGlobal = await getPartnerData();
     const isPart = !!pDataGlobal.partners[userId.toString()];
+    const rDataGlobal = await getResellerData();
+    const isRes = !!rDataGlobal.resellers[userId.toString()];
 
     switch (action) {
       case 'verify_join':
@@ -1012,7 +1300,7 @@ async function handleUpdate(update) {
             await processReferral(userId, pendingReferrals.get(userId));
             pendingReferrals.delete(userId);
           }
-          await tg.sendMessage(chatId, M.WELCOME, admin ? KB.adminMain : KB.main(isPart));
+          await tg.sendMessage(chatId, M.WELCOME, admin ? KB.adminMain : KB.main(isPart, isRes));
         } else {
           // Replaced answerCallbackQuery with sendMessage to prevent duplicate answer errors
           await tg.sendMessage(chatId, "❌ Please join BOTH the Channel and the Group to continue.");
@@ -1084,7 +1372,17 @@ async function handleUpdate(update) {
             await savePartnerData(pDataApprove);
             await tg.sendMessage(pRefId, `🎉 <b>Partner Commission</b>\n\nA referred user deposited ₹${amt}.\n💰 You earned: <code>₹${earned.toFixed(2)}</code>`).catch(()=>{});
         }
+
         // ==========================================
+        // RESELLER DEPOSIT LOGIC
+        // ==========================================
+        const rDataDep = await getResellerData();
+        const rDepId = rDataDep.users[ptIdStr];
+        if (rDepId && rDataDep.resellers[rDepId] && rDataDep.resellers[rDepId].active) {
+           if (!rDataDep.stats[rDepId]) rDataDep.stats[rDepId] = { joined: 0, deposits: 0, sales: 0 };
+           rDataDep.stats[rDepId].deposits += amt;
+           await saveResellerData(rDataDep);
+        }
 
         await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] });
         await tg.sendMessage(chatId, `✅ Payment <code>${pId}</code> processed. Added <code>₹${amt}</code> to User <code>${args[1]}</code>.`);
@@ -1415,9 +1713,16 @@ async function handleUpdate(update) {
         await tg.editMessage(chatId, msgId, pDetMsg, {
            inline_keyboard: [
              [BTN.inline("💸 Mark Paid", `admin_pay_partner:${dtId}`), BTN.inline(myPP.active ? "❌ Disable Partner" : "✅ Enable Partner", `admin_tog_partner:${dtId}`)],
-             [BTN.inline("🔙 Back", "admin_view_partners")]
+             [BTN.inline("✏️ Change UPI", `admin_upi_partner:${dtId}`), BTN.inline("🔙 Back", "admin_view_partners")]
            ]
         });
+        break;
+
+      case 'admin_upi_partner':
+        if (!admin) return;
+        const uIdUpi = args[0];
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `🏦 Enter new UPI for Partner ${uIdUpi}:\n[KEY_PART_UPI_ADMIN:${uIdUpi}]`, { reply_markup: { force_reply: true, selective: true } });
         break;
 
       case 'admin_pay_partner':
@@ -1430,7 +1735,6 @@ async function handleUpdate(update) {
            await savePartnerData(payD);
            await tg.answerCallbackQuery(cb.id, { text: "✅ Partner pending balance marked as Paid.", show_alert: true }).catch(()=>{});
            
-           // refresh details UI by simulating callback
            update.callback_query.data = `admin_view_partner_det:${payId}`;
            return handleUpdate(update);
         } else {
@@ -1447,6 +1751,102 @@ async function handleUpdate(update) {
            await savePartnerData(togD);
            update.callback_query.data = `admin_view_partner_det:${togId}`;
            return handleUpdate(update);
+        }
+        break;
+
+      // ================= RESELLER ADMIN ACTIONS =================
+
+      case 'admin_resellers':
+        if (!admin) return;
+        await tg.editMessage(chatId, msgId, "👑 <b>Reseller Management</b>\n\nManage resellers and view their statistics.", {
+          inline_keyboard: [
+            [BTN.inline("➕ Add Reseller", "admin_add_reseller")],
+            [BTN.inline("📋 Reseller List", "admin_view_resellers")],
+            [BTN.inline("🔙 Back", "back_to_admin")]
+          ]
+        });
+        break;
+
+      case 'admin_add_reseller':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, '👑 Enter Telegram User ID to make them a Reseller:', { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'admin_view_resellers':
+        if (!admin) return;
+        const resListD = await getResellerData();
+        const resIds = Object.keys(resListD.resellers);
+        if (resIds.length === 0) {
+           return await tg.editMessage(chatId, msgId, "👑 No resellers found.", { inline_keyboard: [[BTN.inline("🔙 Back", "admin_resellers")]] });
+        }
+        
+        let rKbd = [];
+        for (const id of resIds) {
+           const uObj = await prisma.user.findUnique({ where: { telegramId: BigInt(id) } });
+           const un = uObj?.username ? `@${uObj.username}` : id;
+           rKbd.push([BTN.inline(`👑 ${un} (₹${resListD.resellers[id].price.toFixed(2)})`, `admin_view_reseller_det:${id}`)]);
+        }
+        rKbd.push([BTN.inline("🔙 Back", "admin_resellers")]);
+        await tg.editMessage(chatId, msgId, "📋 <b>Select a Reseller to view stats:</b>", { inline_keyboard: rKbd });
+        break;
+        
+      case 'admin_view_reseller_det':
+        if (!admin) return;
+        const detResId = args[0];
+        const aResD = await getResellerData();
+        if (!aResD.resellers[detResId]) return;
+        
+        const resUser = await prisma.user.findUnique({ where: { telegramId: BigInt(detResId) } });
+        let rUserName = resUser && resUser.username ? `@${resUser.username}` : "Not Set";
+        
+        const myRP = aResD.resellers[detResId];
+        const myRS = aResD.stats[detResId] || { joined: 0, deposits: 0, sales: 0 };
+        const rlink = `https://t.me/${CONFIG.telegram.botUsername || 'bot'}?start=r_${detResId}`;
+        
+        const rDetMsg = `👑 <b>Reseller:</b>\n${esc(rUserName)}\n\n🆔 <b>User ID:</b>\n<code>${detResId}</code>\n\n🔗 <b>Referral Link:</b>\n<code>${rlink}</code>\n\n👥 <b>Users:</b>\n${myRS.joined}\n\n📦 <b>Successful Purchases:</b>\n${myRS.sales}\n\n💳 <b>Total Deposits:</b>\n₹${(myRS.deposits || 0).toFixed(2)}\n\n💰 <b>Lifetime Earnings:</b>\n₹${(myRP.earned || 0).toFixed(2)}\n\n💸 <b>Paid:</b>\n₹${(myRP.paid || 0).toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${(myRP.pending || 0).toFixed(2)}\n\n💵 <b>Current Number Price:</b>\n₹${myRP.price.toFixed(2)}\n\n<b>Status:</b> ${myRP.active ? 'ACTIVE' : 'INACTIVE'}`;
+        
+        await tg.editMessage(chatId, msgId, rDetMsg, {
+           inline_keyboard: [
+             [BTN.inline("💵 Edit Number Price", `admin_edit_reseller_price:${detResId}`)],
+             [BTN.inline(myRP.active ? "❌ Disable Reseller" : "✅ Enable Reseller", `admin_tog_reseller:${detResId}`), BTN.inline("💸 Mark Paid", `admin_pay_reseller:${detResId}`)],
+             [BTN.inline("🔙 Back", "admin_view_resellers")]
+           ]
+        });
+        break;
+
+      case 'admin_edit_reseller_price':
+        if (!admin) return;
+        const eRId = args[0];
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `💵 Enter new Number Price for Reseller ${eRId}:\n(Minimum: ₹1.00)\n[KEY_RES_PRICE_EDIT_ADMIN:${eRId}]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'admin_tog_reseller':
+        if (!admin) return;
+        const togResId = args[0];
+        const togResD = await getResellerData();
+        if (togResD.resellers[togResId]) {
+           togResD.resellers[togResId].active = !togResD.resellers[togResId].active;
+           await saveResellerData(togResD);
+           update.callback_query.data = `admin_view_reseller_det:${togResId}`;
+           return handleUpdate(update);
+        }
+        break;
+
+      case 'admin_pay_reseller':
+        if (!admin) return;
+        const payResId = args[0];
+        const payResD = await getResellerData();
+        if (payResD.resellers[payResId] && payResD.resellers[payResId].pending > 0) {
+           payResD.resellers[payResId].paid += payResD.resellers[payResId].pending;
+           payResD.resellers[payResId].pending = 0;
+           await saveResellerData(payResD);
+           await tg.answerCallbackQuery(cb.id, { text: "✅ Reseller pending balance marked as Paid.", show_alert: true }).catch(()=>{});
+           update.callback_query.data = `admin_view_reseller_det:${payResId}`;
+           return handleUpdate(update);
+        } else {
+           await tg.answerCallbackQuery(cb.id, { text: "⚠️ No pending balance to pay.", show_alert: true }).catch(()=>{});
         }
         break;
 
@@ -1504,6 +1904,109 @@ async function handleUpdate(update) {
         } else {
           await tg.deleteMessage(chatId, msgId).catch(()=>{});
           await tg.sendMessage(chatId, `💸 Enter withdrawal amount:\n(Available: ₹${(wi_myPP.pending || 0).toFixed(2)})\n[KEY_PART_WITHDRAW]`, { reply_markup: { force_reply: true, selective: true } });
+        }
+        break;
+
+      // ================= RESELLER PANEL CALLBACKS =================
+      case 'reseller_panel':
+        if (!isRes) return;
+        await tg.editMessage(chatId, msgId, "👑 <b>Reseller Panel</b>\n\nSelect an option below:", {
+          inline_keyboard: [
+            [BTN.inline("🔗 My Referral Link", "res_link")],
+            [BTN.inline("📊 Statistics", "res_stats")],
+            [BTN.inline("💵 My Number Price", "res_price"), BTN.inline("✏️ Change Price", "res_edit_price")],
+            [BTN.inline("🏦 Edit UPI", "res_upi"), BTN.inline("💸 Withdraw", "res_with")],
+            [BTN.inline("⚙️ My Settings", "res_settings")],
+            [BTN.inline("⬅️ Back", "close_res_panel")]
+          ]
+        });
+        break;
+
+      case 'res_settings':
+        if (!isRes) return;
+        await tg.editMessage(chatId, msgId, "⚙️ <b>My Settings</b>\n\nConfigure custom features for your referred users.", {
+          inline_keyboard: [
+            [BTN.inline("📢 Force Join Channel", "res_set_channel")],
+            [BTN.inline("👥 Force Join Group", "res_set_group")],
+            [BTN.inline("💬 Welcome Message", "res_welcome")],
+            [BTN.inline("⬅️ Back", "reseller_panel")]
+          ]
+        });
+        break;
+
+      case 'res_set_channel':
+        if (!isRes) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `📢 Send your Channel Username or Invite Link:\n(Send 'none' to remove)\n\nExample:\n@MyChannel\nhttps://t.me/MyChannel\n\n[KEY_RES_CHANNEL]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'res_set_group':
+        if (!isRes) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `👥 Send your Group Username or Invite Link:\n(Send 'none' to remove)\n\nExample:\n@MyGroup\nhttps://t.me/MyGroup\n\n[KEY_RES_GROUP]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'close_res_panel':
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, "🔙 Returning to Main Menu...", admin ? KB.adminMain : KB.main(isPart, isRes));
+        break;
+
+      case 'res_link':
+        if (!isRes) return;
+        const rlink_url = `https://t.me/${CONFIG.telegram.botUsername || 'bot'}?start=r_${userId}`;
+        const rlink_msg = `🔗 <b>Your Referral Link</b>\n\n<code>${rlink_url}</code>\n\n━━━━━━━━━━━━━━\n\nShare this link with your users.\nEvery user joining through this link will permanently belong to you.`;
+        await tg.editMessage(chatId, msgId, rlink_msg, { inline_keyboard: [[BTN.inline("⬅️ Back", "reseller_panel")]] });
+        break;
+
+      case 'res_stats':
+        if (!isRes) return;
+        const st_rD = await getResellerData();
+        const st_rP = st_rD.resellers[userId.toString()];
+        const st_rS = st_rD.stats[userId.toString()] || { joined: 0, deposits: 0, sales: 0 };
+        const st_r_msg = `📊 <b>Statistics</b>\n\n👥 <b>Total Users:</b>\n${st_rS.joined}\n\n📦 <b>Successful Purchases:</b>\n${st_rS.sales}\n\n💳 <b>Total Deposits:</b>\n₹${(st_rS.deposits || 0).toFixed(2)}\n\n💰 <b>Lifetime Earnings:</b>\n₹${(st_rP.earned || 0).toFixed(2)}\n\n💸 <b>Paid:</b>\n₹${(st_rP.paid || 0).toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${(st_rP.pending || 0).toFixed(2)}\n\n💵 <b>Current Number Price:</b>\n₹${st_rP.price.toFixed(2)}`;
+        await tg.editMessage(chatId, msgId, st_r_msg, { inline_keyboard: [[BTN.inline("⬅️ Back", "reseller_panel")]] });
+        break;
+
+      case 'res_price':
+        if (!isRes) return;
+        const pr_rD = await getResellerData();
+        const pr_rP = pr_rD.resellers[userId.toString()];
+        await tg.editMessage(chatId, msgId, `💵 <b>My Number Price</b>\n\nYour current number price is: <code>₹${pr_rP.price.toFixed(2)}</code>\n\nAll your users will purchase numbers at this price.`, { inline_keyboard: [[BTN.inline("✏️ Change Price", "res_edit_price")], [BTN.inline("⬅️ Back", "reseller_panel")]] });
+        break;
+
+      case 'res_edit_price':
+        if (!isRes) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `💵 Enter your new Number Price:\n(Minimum: ₹1.00)\n[KEY_RES_PRICE_EDIT_SELF]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'res_welcome':
+        if (!isRes) return;
+        const rw_rD = await getResellerData();
+        const rw_rP = rw_rD.resellers[userId.toString()];
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        let curWel = rw_rP.welcomeMsg ? rw_rP.welcomeMsg : M.WELCOME;
+        await tg.sendMessage(chatId, `Current Welcome Message:\n\n${curWel}`);
+        await tg.sendMessage(chatId, `💬 Send your new Welcome Message:\n(Or send /start to cancel)\n[KEY_RES_WELCOME]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'res_upi':
+        if (!isRes) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, "🏦 Please send your new UPI ID to receive reseller withdrawals:\n[KEY_RES_UPI_SELF]", { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'res_with':
+        if (!isRes) return;
+        const wi_rD = await getResellerData();
+        const wi_rP = wi_rD.resellers[userId.toString()];
+        
+        if (!wi_rP.upi) {
+          await tg.deleteMessage(chatId, msgId).catch(()=>{});
+          await tg.sendMessage(chatId, "🏦 Please send your UPI ID to receive reseller withdrawals:\n[KEY_RES_UPI_SELF]", { reply_markup: { force_reply: true, selective: true } });
+        } else {
+          await tg.deleteMessage(chatId, msgId).catch(()=>{});
+          await tg.sendMessage(chatId, `💸 Enter reseller withdrawal amount:\n(Available: ₹${(wi_rP.pending || 0).toFixed(2)})\n[KEY_RES_WITHDRAW]`, { reply_markup: { force_reply: true, selective: true } });
         }
         break;
 
@@ -1587,7 +2090,8 @@ async function setupWebhookWithRetry(baseUrl, secret, maxRetries = 5) {
       }
 
       server.log.info(`[TELEGRAM] Deleting old webhook configuration...`);
-      await tg.deleteWebhook({ drop_pending_updates: false });
+      // Change this to true to kill the old pending broadcasts
+      await tg.deleteWebhook({ drop_pending_updates: true }); 
 
       server.log.info(`[TELEGRAM] Registering new webhook: ${finalWebhookUrl}`);
       await tg.setWebhook(finalWebhookUrl, secret);
