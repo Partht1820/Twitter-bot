@@ -140,7 +140,7 @@ async function markUserActive(userId) {
 async function getPartnerData() {
   const s = await prisma.setting.findUnique({ where: { key: 'PARTNER_DATA' } });
   return s ? JSON.parse(s.value) : {
-    partners: {}, // { "tgId": { commission: 20, earned: 0, paid: 0, pending: 0, active: true } }
+    partners: {}, // { "tgId": { commission: 20, earned: 0, paid: 0, pending: 0, active: true, upi: "" } }
     users: {},    // { "userTgId": "partnerTgId" }
     stats: {}     // { "partnerTgId": { joined: 0, deposits: 0 } }
   };
@@ -500,234 +500,271 @@ async function handleUpdate(update) {
     if (!msg.text) return;
     const txt = msg.text.trim();
 
-    // Handle Admin ForceReplies
-    if (admin && msg.reply_to_message?.text) {
+    // Handle ForceReplies
+    if (msg.reply_to_message?.text) {
       const promptText = msg.reply_to_message.text;
 
-      if (promptText.includes('Enter Telegram User ID to make them a Partner:')) {
-        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
-        await tg.sendMessage(chatId, `🤝 Enter Commission Percentage for Partner ${txt} (e.g., 20):\n[KEY_PARTNER:${txt}]`, { reply_markup: { force_reply: true, selective: true } });
-        return;
+      // Admin replies
+      if (admin) {
+        if (promptText.includes('Enter Telegram User ID to make them a Partner:')) {
+          if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
+          await tg.sendMessage(chatId, `🤝 Enter Commission Percentage for Partner ${txt} (e.g., 20):\n[KEY_PARTNER:${txt}]`, { reply_markup: { force_reply: true, selective: true } });
+          return;
+        }
+
+        if (promptText.includes('Enter Commission Percentage for Partner')) {
+          const keyMatch = promptText.match(/\[KEY_PARTNER:\s*(\d+)\]/);
+          if (!keyMatch) return;
+          const targetPId = keyMatch[1];
+          const comm = Number(txt);
+          if (isNaN(comm) || comm <= 0 || comm > 100) return await tg.sendMessage(chatId, '❌ Invalid commission percentage.');
+          
+          const pData = await getPartnerData();
+          if(!pData.partners[targetPId]) {
+             pData.partners[targetPId] = { commission: comm, earned: 0, paid: 0, pending: 0, active: true, upi: "" };
+             if(!pData.stats[targetPId]) pData.stats[targetPId] = { joined: 0, deposits: 0 };
+          } else {
+             pData.partners[targetPId].commission = comm;
+          }
+          await savePartnerData(pData);
+          return await tg.sendMessage(chatId, `✅ <b>Partner Added/Updated!</b>\n\nUser ID: <code>${targetPId}</code>\nCommission: <code>${comm}%</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Partners", "admin_partners")]] });
+        }
+
+        if (promptText.includes('Enter new UPI ID:')) {
+          const pSet = await getPaymentSettings();
+          pSet.upiId = txt;
+          await savePaymentSettings(pSet);
+          return await tg.sendMessage(chatId, `✅ UPI ID updated to <code>${esc(txt)}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
+        }
+
+        if (promptText.includes('Enter Minimum Deposit amount:')) {
+          const amt = Number(txt);
+          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.', { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
+          const pSet = await getPaymentSettings();
+          pSet.minDeposit = amt;
+          await savePaymentSettings(pSet);
+          return await tg.sendMessage(chatId, `✅ Minimum Deposit updated to <code>₹${amt}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
+        }
+
+        if (promptText.includes('Enter new message for')) {
+          const keyMatch = promptText.match(/\[KEY:\s*(\w+)\]/);
+          if (!keyMatch) return;
+          const key = keyMatch[1];
+          
+          const dbMsgs = await prisma.setting.findUnique({ where: { key: 'CUSTOM_MESSAGES' } });
+          const customMsgs = dbMsgs ? JSON.parse(dbMsgs.value) : {};
+          customMsgs[key] = txt; 
+          
+          await prisma.setting.upsert({
+             where: { key: 'CUSTOM_MESSAGES' },
+             update: { value: JSON.stringify(customMsgs) },
+             create: { key: 'CUSTOM_MESSAGES', value: JSON.stringify(customMsgs) }
+          });
+          return await tg.sendMessage(chatId, `✅ Message for <b>${key}</b> updated.`, { inline_keyboard: [[BTN.inline("🔙 Back to Editor", "msg_editor")]] });
+        }
+
+        if (promptText.includes('Enter broadcast message:')) {
+          const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
+          let sent = 0;
+          await tg.sendMessage(chatId, `⏳ Sending broadcast to ${allUsers.length} users...`);
+          for (const u of allUsers) {
+            try {
+              await tg.sendMessage(u.telegramId.toString(), txt);
+              sent++;
+            } catch (err) {} 
+          }
+          return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
+        }
+
+        if (promptText.includes('Enter Telegram User ID to manage:')) {
+          if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_users_menu")]] });
+          const targetTgId = BigInt(txt);
+          const uTarget = await prisma.user.findUnique({ where: { telegramId: targetTgId } });
+          if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_users_menu")]] });
+          
+          const isBan = await isBanned(targetTgId);
+          
+          const totOrders = await prisma.order.count({ where: { userId: uTarget.id } });
+          
+          const totSpentAgg = await prisma.order.aggregate({
+             _sum: { price: true },
+             where: { userId: uTarget.id, status: { in: ['ACTIVE', 'COMPLETED'] } }
+          });
+          const totSpent = Number(totSpentAgg._sum.price || 0);
+
+          const totDepositsAgg = await prisma.walletHistory.aggregate({
+             _sum: { amount: true },
+             where: { userId: uTarget.id, type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS'] } }
+          });
+          const totDeposits = Number(totDepositsAgg._sum.amount || 0);
+          
+          const fn = uTarget.firstName || '';
+          const ln = uTarget.lastName || '';
+          const name = `${fn} ${ln}`.trim() || 'Not Set';
+          const username = uTarget.username ? `@${uTarget.username}` : 'Not Set';
+
+          const info = `👤 <b>User Information</b>\n\n🆔 <b>User ID:</b>\n<code>${txt}</code>\n\n👤 <b>Username:</b>\n${esc(username)}\n\n📝 <b>Name:</b>\n${esc(name)}\n\n💰 <b>Current Balance:</b>\n₹${esc(uTarget.balance)}\n\n💳 <b>Total Deposited:</b>\n₹${totDeposits}\n\n🛒 <b>Total Spent:</b>\n₹${totSpent}\n\n📦 <b>Total Orders:</b>\n${totOrders}\n\n👥 <b>Total Referrals:</b>\n${uTarget.totalReferrals}\n\n📅 <b>Joined:</b>\n${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}`;
+          
+          return await tg.sendMessage(chatId, info, KB.manageUser(txt, isBan));
+        }
+
+        if (promptText.includes('Enter amount to add to user:')) {
+          const uIdMatch = promptText.match(/user:\s*(\d+)/);
+          if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
+          const targetUId = uIdMatch[1];
+          const amt = Number(txt);
+          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
+          
+          const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
+          if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
+
+          await prisma.$transaction([
+            prisma.user.update({ where: { id: uTarget.id }, data: { balance: { increment: amt } } }),
+            prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_ADDED', amount: amt, description: `Admin added balance` } })
+          ]);
+          
+          await tg.sendMessage(chatId, `✅ Added <code>₹${amt}</code> to user <code>${targetUId}</code>.`);
+          await tg.sendMessage(targetUId, `💰 <b>Balance Added</b>\n\nAn admin has added <code>₹${amt}</code> to your wallet.`);
+          return;
+        }
+
+        if (promptText.includes('Enter amount to deduct from user:')) {
+          const uIdMatch = promptText.match(/user:\s*(\d+)/);
+          if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
+          const targetUId = uIdMatch[1];
+          const amt = Number(txt);
+          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
+          
+          const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
+          if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
+
+          await prisma.$transaction([
+            prisma.user.update({ where: { id: uTarget.id }, data: { balance: { decrement: amt } } }),
+            prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_REMOVED', amount: -amt, description: `Admin deducted balance` } })
+          ]);
+          
+          await tg.sendMessage(chatId, `✅ Deducted <code>₹${amt}</code> from user <code>${targetUId}</code>.`);
+          return;
+        }
+
+        if (promptText.includes('Enter new value for SMS setting:')) {
+          const fieldMatch = promptText.match(/setting:\s*(\w+)/);
+          if (!fieldMatch) return await tg.sendMessage(chatId, '❌ Failed to parse setting field.');
+          const field = fieldMatch[1];
+          
+          const cur = await getSmsSettings();
+          const numFields = ['maxPrice', 'timeout', 'interval'];
+          const val = numFields.includes(field) ? Number(txt) : txt;
+          
+          if (numFields.includes(field) && (isNaN(val) || val <= 0)) {
+            return await tg.sendMessage(chatId, '❌ Invalid number.');
+          }
+
+          const newSet = { ...cur, [field]: val };
+          await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
+          return await tg.sendMessage(chatId, `✅ SMS Setting <code>${field}</code> updated to <code>${txt}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+        }
+
+        if (promptText.includes('Enter new Number Price:')) {
+          const amt = Number(txt);
+          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid price.', { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+          const cur = await getSmsSettings();
+          const newSet = { ...cur, maxPrice: amt };
+          await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
+          return await tg.sendMessage(chatId, `✅ <b>Number Price</b> updated to <code>₹${amt}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+        }
+
+        if (promptText.includes('Enter new Referral Reward:')) {
+          const amt = Number(txt);
+          if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid reward amount.', { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+          const cur = await getSysSettings();
+          const newSet = { ...cur, referralBonus: amt };
+          await prisma.setting.upsert({ where: { key: 'SYSTEM_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SYSTEM_SETTINGS', value: JSON.stringify(newSet) } });
+          return await tg.sendMessage(chatId, `✅ <b>Referral Reward</b> updated to <code>₹${amt}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
+        }
+        
+        if (promptText.includes('Send the Telegram User ID to bypass Force Join:')) {
+          if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+          const list = await getBypassUsers();
+          if (!list.includes(txt)) {
+            list.push(txt);
+            await updateBypassUsers(list);
+          }
+          return await tg.sendMessage(chatId, `✅ <b>User added successfully.</b>\n\nThis user can now use the bot without joining the Channel or Group.`, { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+        }
+
+        if (promptText.includes('Send the Telegram User ID to remove from bypass:')) {
+          if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+          let list = await getBypassUsers();
+          if (list.includes(txt)) {
+            list = list.filter(id => id !== txt);
+            await updateBypassUsers(list);
+            return await tg.sendMessage(chatId, `✅ <b>User removed successfully.</b>\n\nForce Join will now apply to this user again.`, { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+          } else {
+            return await tg.sendMessage(chatId, '⚠️ User is not in the bypass list.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
+          }
+        }
       }
 
-      if (promptText.includes('Enter Commission Percentage for Partner')) {
-        const keyMatch = promptText.match(/\[KEY_PARTNER:\s*(\d+)\]/);
-        if (!keyMatch) return;
-        const targetPId = keyMatch[1];
-        const comm = Number(txt);
-        if (isNaN(comm) || comm <= 0 || comm > 100) return await tg.sendMessage(chatId, '❌ Invalid commission percentage.');
-        
+      // Partner replies
+      if (promptText.includes('[KEY_PART_UPI]')) {
         const pData = await getPartnerData();
-        if(!pData.partners[targetPId]) {
-           pData.partners[targetPId] = { commission: comm, earned: 0, paid: 0, pending: 0, active: true };
-           if(!pData.stats[targetPId]) pData.stats[targetPId] = { joined: 0, deposits: 0 };
-        } else {
-           pData.partners[targetPId].commission = comm;
+        if (pData.partners[userId.toString()]) {
+          pData.partners[userId.toString()].upi = txt;
+          await savePartnerData(pData);
+          return await tg.sendMessage(chatId, `✅ UPI ID saved: <code>${esc(txt)}</code>\n\nYou can now request a withdrawal from the Partner Panel.`);
         }
-        await savePartnerData(pData);
-        return await tg.sendMessage(chatId, `✅ <b>Partner Added/Updated!</b>\n\nUser ID: <code>${targetPId}</code>\nCommission: <code>${comm}%</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Partners", "admin_partners")]] });
       }
 
-      if (promptText.includes('Enter new UPI ID:')) {
-        const pSet = await getPaymentSettings();
-        pSet.upiId = txt;
-        await savePaymentSettings(pSet);
-        return await tg.sendMessage(chatId, `✅ UPI ID updated to <code>${esc(txt)}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
-      }
-
-      if (promptText.includes('Enter Minimum Deposit amount:')) {
-        const amt = Number(txt);
-        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.', { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
-        const pSet = await getPaymentSettings();
-        pSet.minDeposit = amt;
-        await savePaymentSettings(pSet);
-        return await tg.sendMessage(chatId, `✅ Minimum Deposit updated to <code>₹${amt}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Payment Settings", "pay_settings")]] });
-      }
-
-      if (promptText.includes('Enter new message for')) {
-        const keyMatch = promptText.match(/\[KEY:\s*(\w+)\]/);
-        if (!keyMatch) return;
-        const key = keyMatch[1];
-        
-        const dbMsgs = await prisma.setting.findUnique({ where: { key: 'CUSTOM_MESSAGES' } });
-        const customMsgs = dbMsgs ? JSON.parse(dbMsgs.value) : {};
-        customMsgs[key] = txt; 
-        
-        await prisma.setting.upsert({
-           where: { key: 'CUSTOM_MESSAGES' },
-           update: { value: JSON.stringify(customMsgs) },
-           create: { key: 'CUSTOM_MESSAGES', value: JSON.stringify(customMsgs) }
-        });
-        return await tg.sendMessage(chatId, `✅ Message for <b>${key}</b> updated.`, { inline_keyboard: [[BTN.inline("🔙 Back to Editor", "msg_editor")]] });
-      }
-
-      if (promptText.includes('Enter broadcast message:')) {
-        const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
-        let sent = 0;
-        await tg.sendMessage(chatId, `⏳ Sending broadcast to ${allUsers.length} users...`);
-        for (const u of allUsers) {
-          try {
-            await tg.sendMessage(u.telegramId.toString(), txt);
-            sent++;
-          } catch (err) {} 
-        }
-        return await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
-      }
-
-      if (promptText.includes('Enter Telegram User ID to manage:')) {
-        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_users_menu")]] });
-        const targetTgId = BigInt(txt);
-        const uTarget = await prisma.user.findUnique({ where: { telegramId: targetTgId } });
-        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found in database.', { inline_keyboard: [[BTN.inline("🔙 Back", "admin_users_menu")]] });
-        
-        const isBan = await isBanned(targetTgId);
-        
-        const totOrders = await prisma.order.count({ where: { userId: uTarget.id } });
-        
-        const totSpentAgg = await prisma.order.aggregate({
-           _sum: { price: true },
-           where: { userId: uTarget.id, status: { in: ['ACTIVE', 'COMPLETED'] } }
-        });
-        const totSpent = Number(totSpentAgg._sum.price || 0);
-
-        const totDepositsAgg = await prisma.walletHistory.aggregate({
-           _sum: { amount: true },
-           where: { userId: uTarget.id, type: { in: ['DEPOSIT', 'ADMIN_ADDED', 'REFERRAL_BONUS'] } }
-        });
-        const totDeposits = Number(totDepositsAgg._sum.amount || 0);
-        
-        const fn = uTarget.firstName || '';
-        const ln = uTarget.lastName || '';
-        const name = `${fn} ${ln}`.trim() || 'Not Set';
-        const username = uTarget.username ? `@${uTarget.username}` : 'Not Set';
-
-        const info = `👤 <b>User Information</b>\n\n🆔 <b>User ID:</b>\n<code>${txt}</code>\n\n👤 <b>Username:</b>\n${esc(username)}\n\n📝 <b>Name:</b>\n${esc(name)}\n\n💰 <b>Current Balance:</b>\n₹${esc(uTarget.balance)}\n\n💳 <b>Total Deposited:</b>\n₹${totDeposits}\n\n🛒 <b>Total Spent:</b>\n₹${totSpent}\n\n📦 <b>Total Orders:</b>\n${totOrders}\n\n👥 <b>Total Referrals:</b>\n${uTarget.totalReferrals}\n\n📅 <b>Joined:</b>\n${new Date(uTarget.createdAt).toLocaleDateString('en-IN')}`;
-        
-        return await tg.sendMessage(chatId, info, KB.manageUser(txt, isBan));
-      }
-
-      if (promptText.includes('Enter amount to add to user:')) {
-        const uIdMatch = promptText.match(/user:\s*(\d+)/);
-        if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
-        const targetUId = uIdMatch[1];
+      if (promptText.includes('[KEY_PART_WITHDRAW]')) {
         const amt = Number(txt);
         if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
+        const pData = await getPartnerData();
+        const myPP = pData.partners[userId.toString()];
+        if (!myPP) return;
+        if (amt > (myPP.pending || 0)) return await tg.sendMessage(chatId, `❌ Insufficient pending balance. Your available balance is ₹${(myPP.pending || 0).toFixed(2)}.`);
         
-        const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
-        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
-
-        await prisma.$transaction([
-          prisma.user.update({ where: { id: uTarget.id }, data: { balance: { increment: amt } } }),
-          prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_ADDED', amount: amt, description: `Admin added balance` } })
-        ]);
-        
-        await tg.sendMessage(chatId, `✅ Added <code>₹${amt}</code> to user <code>${targetUId}</code>.`);
-        await tg.sendMessage(targetUId, `💰 <b>Balance Added</b>\n\nAn admin has added <code>₹${amt}</code> to your wallet.`);
-        return;
-      }
-
-      if (promptText.includes('Enter amount to deduct from user:')) {
-        const uIdMatch = promptText.match(/user:\s*(\d+)/);
-        if (!uIdMatch) return await tg.sendMessage(chatId, '❌ Failed to parse user ID.');
-        const targetUId = uIdMatch[1];
-        const amt = Number(txt);
-        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid amount.');
-        
-        const uTarget = await prisma.user.findUnique({ where: { telegramId: BigInt(targetUId) } });
-        if (!uTarget) return await tg.sendMessage(chatId, '❌ User not found.');
-
-        await prisma.$transaction([
-          prisma.user.update({ where: { id: uTarget.id }, data: { balance: { decrement: amt } } }),
-          prisma.walletHistory.create({ data: { userId: uTarget.id, type: 'ADMIN_REMOVED', amount: -amt, description: `Admin deducted balance` } })
-        ]);
-        
-        await tg.sendMessage(chatId, `✅ Deducted <code>₹${amt}</code> from user <code>${targetUId}</code>.`);
-        return;
-      }
-
-      if (promptText.includes('Enter new value for SMS setting:')) {
-        const fieldMatch = promptText.match(/setting:\s*(\w+)/);
-        if (!fieldMatch) return await tg.sendMessage(chatId, '❌ Failed to parse setting field.');
-        const field = fieldMatch[1];
-        
-        const cur = await getSmsSettings();
-        const numFields = ['maxPrice', 'timeout', 'interval'];
-        const val = numFields.includes(field) ? Number(txt) : txt;
-        
-        if (numFields.includes(field) && (isNaN(val) || val <= 0)) {
-          return await tg.sendMessage(chatId, '❌ Invalid number.');
+        const sys = await getSysSettings();
+        const aId = sys?.adminChatId || CONFIG?.telegram?.adminId;
+        if (aId) {
+          const reqMsg = `💸 <b>New Withdrawal Request</b>\n\n👤 <b>Partner ID:</b> <code>${userId}</code>\n💰 <b>Amount:</b> ₹${amt}\n🏦 <b>UPI:</b> <code>${esc(myPP.upi)}</code>`;
+          await tg.sendMessage(aId, reqMsg, { inline_keyboard: [[BTN.inline("View Partner", `admin_view_partner_det:${userId}`)]] });
         }
-
-        const newSet = { ...cur, [field]: val };
-        await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
-        return await tg.sendMessage(chatId, `✅ SMS Setting <code>${field}</code> updated to <code>${txt}</code>.`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
-      }
-
-      if (promptText.includes('Enter new Number Price:')) {
-        const amt = Number(txt);
-        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid price.', { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
-        const cur = await getSmsSettings();
-        const newSet = { ...cur, maxPrice: amt };
-        await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(newSet) } });
-        return await tg.sendMessage(chatId, `✅ <b>Number Price</b> updated to <code>₹${amt}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
-      }
-
-      if (promptText.includes('Enter new Referral Reward:')) {
-        const amt = Number(txt);
-        if (isNaN(amt) || amt <= 0) return await tg.sendMessage(chatId, '❌ Invalid reward amount.', { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
-        const cur = await getSysSettings();
-        const newSet = { ...cur, referralBonus: amt };
-        await prisma.setting.upsert({ where: { key: 'SYSTEM_SETTINGS' }, update: { value: JSON.stringify(newSet) }, create: { key: 'SYSTEM_SETTINGS', value: JSON.stringify(newSet) } });
-        return await tg.sendMessage(chatId, `✅ <b>Referral Reward</b> updated to <code>₹${amt}</code>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "admin_settings")]] });
-      }
-      
-      if (promptText.includes('Send the Telegram User ID to bypass Force Join:')) {
-        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
-        const list = await getBypassUsers();
-        if (!list.includes(txt)) {
-          list.push(txt);
-          await updateBypassUsers(list);
-        }
-        return await tg.sendMessage(chatId, `✅ <b>User added successfully.</b>\n\nThis user can now use the bot without joining the Channel or Group.`, { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
-      }
-
-      if (promptText.includes('Send the Telegram User ID to remove from bypass:')) {
-        if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
-        let list = await getBypassUsers();
-        if (list.includes(txt)) {
-          list = list.filter(id => id !== txt);
-          await updateBypassUsers(list);
-          return await tg.sendMessage(chatId, `✅ <b>User removed successfully.</b>\n\nForce Join will now apply to this user again.`, { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
-        } else {
-          return await tg.sendMessage(chatId, '⚠️ User is not in the bypass list.', { inline_keyboard: [[BTN.inline("🔙 Back to Bypass Menu", "admin_bypass")]] });
-        }
+        return await tg.sendMessage(chatId, `✅ Withdrawal request for ₹${amt} sent to admin.`);
       }
     }
 
     if (txt.startsWith('/start')) {
       const payload = txt.split(' ')[1];
-      await getUser(userId); // Ensure user is created/fetched first
+      
+      let isNewUser = false;
+      let userInDb = await prisma.user.findUnique({ where: { telegramId: BigInt(userId) } });
+      if (!userInDb) {
+        isNewUser = true;
+        userInDb = await prisma.user.create({ data: { telegramId: BigInt(userId) } });
+      }
 
       if (payload) {
         if (payload.startsWith('p_')) {
           const pTgId = payload.replace('p_', '');
-          const pData = await getPartnerData();
-          if (pData.partners[pTgId] && pTgId !== String(userId)) {
-            if (!pData.users[String(userId)]) {
-              pData.users[String(userId)] = pTgId;
-              if(!pData.stats[pTgId]) pData.stats[pTgId] = { joined: 0, deposits: 0 };
-              pData.stats[pTgId].joined += 1;
-              await savePartnerData(pData);
+          if (isNewUser && pTgId !== String(userId)) {
+            const pData = await getPartnerData();
+            if (pData.partners[pTgId]) {
+              if (!pData.users[String(userId)]) {
+                pData.users[String(userId)] = pTgId;
+                if(!pData.stats[pTgId]) pData.stats[pTgId] = { joined: 0, deposits: 0 };
+                pData.stats[pTgId].joined += 1;
+                await savePartnerData(pData);
+                
+                await tg.sendMessage(pTgId, `🎉 <b>New Partner Referral</b>\n\nA new user has joined using your link!\nThey are now permanently linked to your account.`).catch(()=>{});
+              }
             }
           }
         } else if (/^\d+$/.test(payload) && payload !== String(userId)) {
-          const userInDb = await prisma.user.findUnique({ where: { telegramId: BigInt(userId) } });
-          if (userInDb) {
-            const existingRef = await prisma.referral.findUnique({ where: { referredId: userInDb.id } });
-            if (!existingRef && !pendingReferrals.has(userId)) {
-              pendingReferrals.set(userId, payload);
-              await tg.sendMessage(payload, M.REF_PENDING).catch(()=>{});
-            }
+          const existingRef = await prisma.referral.findUnique({ where: { referredId: userInDb.id } });
+          if (!existingRef && !pendingReferrals.has(userId) && isNewUser) {
+            pendingReferrals.set(userId, payload);
+            await tg.sendMessage(payload, M.REF_PENDING).catch(()=>{});
           }
         }
       }
@@ -846,27 +883,13 @@ async function handleUpdate(update) {
 
       case '🤝 Partner Panel':
         if (!isPart) return;
-        await tg.sendMessage(chatId, "🤝 <b>Partner Panel</b>\n\nWelcome to your Partner Dashboard. Manage your referrals and track your earnings below.", {
-          keyboard: [[{text: "🔗 My Referral Link"}], [{text: "🔙 Main Menu"}]],
-          resize_keyboard: true,
-          is_persistent: true
+        await tg.sendMessage(chatId, "🤝 <b>Partner Panel</b>\n\nSelect an option below:", {
+          inline_keyboard: [
+            [BTN.inline("🔗 My Referral Link", "part_link")],
+            [BTN.inline("📊 Statistics", "part_stats"), BTN.inline("💰 Earnings", "part_earn")],
+            [BTN.inline("💸 Withdraw", "part_with")]
+          ]
         });
-        break;
-        
-      case '🔗 My Referral Link':
-        if (!isPart) return;
-        const pStatInfo = await getPartnerData();
-        const myP = pStatInfo.partners[userId.toString()];
-        const myS = pStatInfo.stats[userId.toString()] || { joined: 0, deposits: 0 };
-        const myLink = `https://t.me/${CONFIG.telegram.botUsername || 'bot'}?start=p_${userId}`;
-        
-        const myPnlTxt = `━━━━━━━━━━━━━━\n\n🔗 <b>Your Referral Link</b>\n\n<code>${myLink}</code>\n\n━━━━━━━━━━━━━━\n\n👥 <b>Users Joined:</b>\n${myS.joined}\n\n💳 <b>Total Deposits:</b>\n₹${(myS.deposits || 0).toFixed(2)}\n\n💰 <b>Lifetime Earnings:</b>\n₹${(myP.earned || 0).toFixed(2)}\n\n💸 <b>Paid:</b>\n₹${(myP.paid || 0).toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${(myP.pending || 0).toFixed(2)}\n\n━━━━━━━━━━━━━━\n\nShare this link to invite new users.\nYou'll automatically earn your commission whenever your referred users make approved deposits.`;
-        
-        await tg.sendMessage(chatId, myPnlTxt);
-        break;
-
-      case '🔙 Main Menu':
-        await tg.sendMessage(chatId, "🔙 Returning to Main Menu...", admin ? KB.adminMain : KB.main(isPart));
         break;
 
       case '📊 Statistics':
@@ -1431,6 +1454,63 @@ async function handleUpdate(update) {
            await savePartnerData(togD);
            update.callback_query.data = `admin_view_partner_det:${togId}`;
            return handleUpdate(update);
+        }
+        break;
+
+      // ================= PARTNER PANEL CALLBACKS =================
+      case 'part_panel':
+        if (!isPart) return;
+        await tg.editMessage(chatId, msgId, "🤝 <b>Partner Panel</b>\n\nSelect an option below:", {
+          inline_keyboard: [
+            [BTN.inline("🔗 My Referral Link", "part_link")],
+            [BTN.inline("📊 Statistics", "part_stats"), BTN.inline("💰 Earnings", "part_earn")],
+            [BTN.inline("💸 Withdraw", "part_with")]
+          ]
+        });
+        break;
+
+      case 'part_link':
+        if (!isPart) return;
+        const link_pStatInfo = await getPartnerData();
+        const link_myPP = link_pStatInfo.partners[userId.toString()];
+        const link_myS = link_pStatInfo.stats[userId.toString()] || { joined: 0, deposits: 0 };
+        const link_myLink = `https://t.me/${CONFIG.telegram.botUsername || 'bot'}?start=p_${userId}`;
+        
+        const link_myPnlTxt = `🔗 <b>Your Referral Link</b>\n\n<code>${link_myLink}</code>\n\n━━━━━━━━━━━━━━\n\n👥 <b>Users Joined:</b>\n${link_myS.joined}\n\n💳 <b>Total Deposits:</b>\n₹${(link_myS.deposits || 0).toFixed(2)}\n\n💰 <b>Lifetime Earnings:</b>\n₹${(link_myPP.earned || 0).toFixed(2)}\n\n💸 <b>Paid:</b>\n₹${(link_myPP.paid || 0).toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${(link_myPP.pending || 0).toFixed(2)}\n\n━━━━━━━━━━━━━━\n\nShare this link to invite new users.\nYou'll automatically earn your commission whenever your referred users make approved deposits.`;
+        
+        await tg.editMessage(chatId, msgId, link_myPnlTxt, { inline_keyboard: [[BTN.inline("⬅️ Back", "part_panel")]] });
+        break;
+
+      case 'part_stats':
+        if (!isPart) return;
+        const st_pStatInfo = await getPartnerData();
+        const st_myPP = st_pStatInfo.partners[userId.toString()];
+        const st_myS = st_pStatInfo.stats[userId.toString()] || { joined: 0, deposits: 0 };
+        
+        const st_txt = `📊 <b>Statistics</b>\n\n👥 <b>Total Users:</b>\n${st_myS.joined}\n\n💳 <b>Total Deposits:</b>\n₹${(st_myS.deposits || 0).toFixed(2)}\n\n<b>Commission %:</b>\n${st_myPP.commission}%\n\n💰 <b>Lifetime Earnings:</b>\n₹${(st_myPP.earned || 0).toFixed(2)}\n\n💸 <b>Paid:</b>\n₹${(st_myPP.paid || 0).toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${(st_myPP.pending || 0).toFixed(2)}`;
+        await tg.editMessage(chatId, msgId, st_txt, { inline_keyboard: [[BTN.inline("⬅️ Back", "part_panel")]] });
+        break;
+
+      case 'part_earn':
+        if (!isPart) return;
+        const er_pStatInfo = await getPartnerData();
+        const er_myPP = er_pStatInfo.partners[userId.toString()];
+        
+        const er_txt = `💰 <b>Earnings</b>\n\n💰 <b>Lifetime Earnings:</b>\n₹${(er_myPP.earned || 0).toFixed(2)}\n\n💸 <b>Paid:</b>\n₹${(er_myPP.paid || 0).toFixed(2)}\n\n🕒 <b>Pending:</b>\n₹${(er_myPP.pending || 0).toFixed(2)}\n\n✅ <b>Available to Withdraw:</b>\n₹${(er_myPP.pending || 0).toFixed(2)}`;
+        await tg.editMessage(chatId, msgId, er_txt, { inline_keyboard: [[BTN.inline("⬅️ Back", "part_panel")]] });
+        break;
+
+      case 'part_with':
+        if (!isPart) return;
+        const wi_pStatInfo = await getPartnerData();
+        const wi_myPP = wi_pStatInfo.partners[userId.toString()];
+        
+        if (!wi_myPP.upi) {
+          await tg.deleteMessage(chatId, msgId).catch(()=>{});
+          await tg.sendMessage(chatId, "🏦 Please send your UPI ID to receive withdrawals:\n[KEY_PART_UPI]", { reply_markup: { force_reply: true, selective: true } });
+        } else {
+          await tg.deleteMessage(chatId, msgId).catch(()=>{});
+          await tg.sendMessage(chatId, `💸 Enter withdrawal amount:\n(Available: ₹${(wi_myPP.pending || 0).toFixed(2)})\n[KEY_PART_WITHDRAW]`, { reply_markup: { force_reply: true, selective: true } });
         }
         break;
 
