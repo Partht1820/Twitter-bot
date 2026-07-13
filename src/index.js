@@ -81,7 +81,6 @@ const KB = {
     [{text: "🛒 Orders"}, {text: "📢 Broadcast"}, {text: "⚙️ Settings"}],
     [{text: "🤝 Partners"}, {text: "👑 Reseller Management"}]
   ], resize_keyboard: true, is_persistent: true },
-  forceJoin: (c, g) => ({ inline_keyboard: [[BTN.url("📢 Join Channel", `https://t.me/${c.replace("@","")}`)], [BTN.url("👥 Join Group", `https://t.me/${g.replace("@","")}`)], [BTN.inline("✅ I've Joined", "verify_join")]] }),
   cancel: (id) => ({ inline_keyboard: [[BTN.inline("❌ Cancel Number", `cancel_order:${id}`)]] }),
   approveReject: (pId, uId) => ({ inline_keyboard: [[BTN.inline("✅ Approve", `approve_payment:${pId}:${uId}`), BTN.inline("❌ Reject", `reject_payment:${pId}:${uId}`)]] }),
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
@@ -124,6 +123,18 @@ function esc(text) {
     .replace(/>/g, '&gt;');
 }
 
+function getChatIdForApi(val) {
+  if (!val) return null;
+  if (val.includes('t.me/')) {
+      const parts = val.split('t.me/');
+      let id = parts[1].replace(/\//g, '');
+      if (id.startsWith('+') || id.startsWith('joinchat')) return val; 
+      return '@' + id;
+  }
+  if (!val.startsWith('@') && !val.startsWith('-')) return '@' + val;
+  return val;
+}
+
 // ==========================================
 // 3. DATABASE HELPER FUNCTIONS
 // ==========================================
@@ -158,7 +169,7 @@ async function savePartnerData(data) {
 async function getResellerData() {
   const s = await prisma.setting.findUnique({ where: { key: 'RESELLER_DATA' } });
   return s ? JSON.parse(s.value) : {
-    resellers: {}, // { "tgId": { price: 2.50, earned: 0, paid: 0, pending: 0, active: true, upi: "", welcomeMsg: "" } }
+    resellers: {}, // { "tgId": { price: 2.50, earned: 0, paid: 0, pending: 0, active: true, upi: "", welcomeMsg: "", channel: "", group: "" } }
     users: {},     // { "userTgId": "resellerTgId" }
     stats: {}      // { "resellerTgId": { joined: 0, deposits: 0, sales: 0 } }
   };
@@ -248,8 +259,28 @@ async function checkForceJoin(userId) {
   if (await isAdmin(userId)) return true;
   if (await isBypassed(userId)) return true;
   
+  const rData = await getResellerData();
+  const rId = rData.users[userId.toString()];
+
+  if (rId && rData.resellers[rId]) {
+    const r = rData.resellers[rId];
+    if (!r.channel && !r.group) return true;
+    try {
+      if (r.channel) {
+         const cApi = getChatIdForApi(r.channel);
+         const c = await tg.getChatMember(cApi, userId);
+         if (!['creator', 'administrator', 'member', 'restricted'].includes(c?.status)) return false;
+      }
+      if (r.group) {
+         const gApi = getChatIdForApi(r.group);
+         const g = await tg.getChatMember(gApi, userId);
+         if (!['creator', 'administrator', 'member', 'restricted'].includes(g?.status)) return false;
+      }
+      return true;
+    } catch(e) { return false; }
+  }
+
   const sys = await getSysSettings();
-  
   if (sys?.forceJoinEnabled === false) return true;
 
   const channel = sys?.forceJoinChannel || CONFIG.telegram.forceJoinChannel;
@@ -275,9 +306,24 @@ async function verifyAccess(chatId, userId) {
   
   const isJoined = await checkForceJoin(userId);
   if (!isJoined) {
-    const channel = sys?.forceJoinChannel || CONFIG.telegram.forceJoinChannel;
-    const group = sys?.forceJoinGroup || CONFIG.telegram.forceJoinGroup;
-    await tg.sendMessage(chatId, M.FORCE_JOIN, KB.forceJoin(channel, group));
+    let channel, group;
+    const rData = await getResellerData();
+    const rId = rData.users[userId.toString()];
+
+    if (rId && rData.resellers[rId]) {
+       channel = rData.resellers[rId].channel;
+       group = rData.resellers[rId].group;
+    } else {
+       channel = sys?.forceJoinChannel || CONFIG.telegram.forceJoinChannel;
+       group = sys?.forceJoinGroup || CONFIG.telegram.forceJoinGroup;
+    }
+
+    let buttons = [];
+    if (channel) buttons.push([BTN.url("📢 Join Channel", channel.startsWith('http') ? channel : `https://t.me/${channel.replace("@","")}`)]);
+    if (group) buttons.push([BTN.url("👥 Join Group", group.startsWith('http') ? group : `https://t.me/${group.replace("@","")}`)]);
+    buttons.push([BTN.inline("✅ I've Joined", "verify_join")]);
+
+    await tg.sendMessage(chatId, M.FORCE_JOIN, { inline_keyboard: buttons });
     return false;
   }
   return true;
@@ -592,7 +638,7 @@ async function handleUpdate(update) {
           
           const resD = await getResellerData();
           if(!resD.resellers[targetRId]) {
-             resD.resellers[targetRId] = { price: price, earned: 0, paid: 0, pending: 0, active: true, upi: "", welcomeMsg: "" };
+             resD.resellers[targetRId] = { price: price, earned: 0, paid: 0, pending: 0, active: true, upi: "", welcomeMsg: "", channel: "", group: "" };
              if(!resD.stats[targetRId]) resD.stats[targetRId] = { joined: 0, deposits: 0, sales: 0 };
           } else {
              resD.resellers[targetRId].price = price;
@@ -849,7 +895,33 @@ async function handleUpdate(update) {
         if (resD.resellers[userId.toString()]) {
           resD.resellers[userId.toString()].welcomeMsg = txt;
           await saveResellerData(resD);
-          return await tg.sendMessage(chatId, `✅ <b>Custom Welcome Message Saved!</b>`, { inline_keyboard: [[BTN.inline("🔙 Back to Panel", "reseller_panel")]] });
+          return await tg.sendMessage(chatId, `✅ <b>Custom Welcome Message Saved!</b>`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "res_settings")]] });
+        }
+      }
+
+      if (promptText.includes('[KEY_RES_CHANNEL]')) {
+        const resD = await getResellerData();
+        if (resD.resellers[userId.toString()]) {
+          if (txt.toLowerCase() === 'none' || txt.toLowerCase() === 'remove') {
+              resD.resellers[userId.toString()].channel = null;
+          } else {
+              resD.resellers[userId.toString()].channel = txt;
+          }
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ Force Join Channel updated!`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "res_settings")]] });
+        }
+      }
+
+      if (promptText.includes('[KEY_RES_GROUP]')) {
+        const resD = await getResellerData();
+        if (resD.resellers[userId.toString()]) {
+          if (txt.toLowerCase() === 'none' || txt.toLowerCase() === 'remove') {
+              resD.resellers[userId.toString()].group = null;
+          } else {
+              resD.resellers[userId.toString()].group = txt;
+          }
+          await saveResellerData(resD);
+          return await tg.sendMessage(chatId, `✅ Force Join Group updated!`, { inline_keyboard: [[BTN.inline("🔙 Back to Settings", "res_settings")]] });
         }
       }
 
@@ -1077,7 +1149,7 @@ async function handleUpdate(update) {
             [BTN.inline("📊 Statistics", "res_stats")],
             [BTN.inline("💵 My Number Price", "res_price"), BTN.inline("✏️ Change Price", "res_edit_price")],
             [BTN.inline("🏦 Edit UPI", "res_upi"), BTN.inline("💸 Withdraw", "res_with")],
-            [BTN.inline("💬 Welcome Message", "res_welcome")],
+            [BTN.inline("⚙️ My Settings", "res_settings")],
             [BTN.inline("⬅️ Back", "close_res_panel")]
           ]
         });
@@ -1585,8 +1657,6 @@ async function handleUpdate(update) {
         await tg.sendMessage(chatId, `➖ Enter amount to deduct from user: ${args[0]}`, { reply_markup: { force_reply: true, selective: true } });
         break;
 
-      // ================= PARTNER ADMIN ACTIONS =================
-
       case 'admin_add_partner':
         if (!admin) return;
         await tg.deleteMessage(chatId, msgId).catch(()=>{});
@@ -1841,10 +1911,34 @@ async function handleUpdate(update) {
             [BTN.inline("📊 Statistics", "res_stats")],
             [BTN.inline("💵 My Number Price", "res_price"), BTN.inline("✏️ Change Price", "res_edit_price")],
             [BTN.inline("🏦 Edit UPI", "res_upi"), BTN.inline("💸 Withdraw", "res_with")],
-            [BTN.inline("💬 Welcome Message", "res_welcome")],
+            [BTN.inline("⚙️ My Settings", "res_settings")],
             [BTN.inline("⬅️ Back", "close_res_panel")]
           ]
         });
+        break;
+
+      case 'res_settings':
+        if (!isRes) return;
+        await tg.editMessage(chatId, msgId, "⚙️ <b>My Settings</b>\n\nConfigure custom features for your referred users.", {
+          inline_keyboard: [
+            [BTN.inline("📢 Force Join Channel", "res_set_channel")],
+            [BTN.inline("👥 Force Join Group", "res_set_group")],
+            [BTN.inline("💬 Welcome Message", "res_welcome")],
+            [BTN.inline("⬅️ Back", "reseller_panel")]
+          ]
+        });
+        break;
+
+      case 'res_set_channel':
+        if (!isRes) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `📢 Send your Channel Username or Invite Link:\n(Send 'none' to remove)\n\nExample:\n@MyChannel\nhttps://t.me/MyChannel\n\n[KEY_RES_CHANNEL]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'res_set_group':
+        if (!isRes) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `👥 Send your Group Username or Invite Link:\n(Send 'none' to remove)\n\nExample:\n@MyGroup\nhttps://t.me/MyGroup\n\n[KEY_RES_GROUP]`, { reply_markup: { force_reply: true, selective: true } });
         break;
 
       case 'close_res_panel':
