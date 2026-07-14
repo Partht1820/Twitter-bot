@@ -2041,6 +2041,13 @@ async function handleUpdate(update) {
   }
 }
 
+// Health Check Route
+server.get('/', async (req, reply) => {
+  return reply.send({
+    status: 'ok',
+    message: 'Bot is running'
+  });
+});
 server.post('/webhook', async (req, reply) => {
   if (req.headers['x-telegram-bot-api-secret-token'] !== CONFIG.webhook.secret) {
     return reply.code(401).send({ error: 'Unauthorized' });
