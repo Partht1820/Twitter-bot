@@ -23,6 +23,9 @@ const pendingReferrals = new Map();
 // In-memory store to track and prevent duplicate callback queries
 const answeredCallbacks = new Set();
 
+// In-memory store for Happy Hour creation drafts
+const hhDrafts = new Map();
+
 // ==========================================
 // 2. CONSTANTS: MESSAGES & KEYBOARDS
 // ==========================================
@@ -85,6 +88,7 @@ const KB = {
   approveReject: (pId, uId) => ({ inline_keyboard: [[BTN.inline("✅ Approve", `approve_payment:${pId}:${uId}`), BTN.inline("❌ Reject", `reject_payment:${pId}:${uId}`)]] }),
   support: (u) => ({ inline_keyboard: [[BTN.url("💬 Contact Support", `https://t.me/${u.replace("@","")}`)]] }),
   adminSettings: () => ({ inline_keyboard: [
+    [BTN.inline("⏰ Happy Hour Pricing", "hh_menu")],
     [BTN.inline("💰 Number Price", "admin_num_price"), BTN.inline("🎁 Referral Reward", "admin_ref_reward")],
     [BTN.inline("💳 Payment Settings", "pay_settings"), BTN.inline("💬 Message Editor", "msg_editor")],
     [BTN.inline("🚫 Force Join Bypass", "admin_bypass")],
@@ -111,7 +115,20 @@ const KB = {
     [BTN.inline("🎁 Refer & Earn", "edit_msg:REFER_INFO"), BTN.inline("📞 Support", "edit_msg:SUPPORT")],
     [BTN.inline("🚫 Force Join", "edit_msg:FORCE_JOIN"), BTN.inline("🛠 Maintenance", "edit_msg:MAINTENANCE_MODE")],
     [BTN.inline("🔙 Back", "admin_settings")]
-  ] })
+  ] }),
+  happyHourMenu: (hasSchedule) => {
+    if (!hasSchedule) {
+      return { inline_keyboard: [[BTN.inline("➕ Create Schedule", "hh_create")], [BTN.inline("🔙 Back", "admin_settings")]] };
+    }
+    return {
+      inline_keyboard: [
+        [BTN.inline("▶ Start Now", "hh_start"), BTN.inline("⏹ Stop Now", "hh_stop")],
+        [BTN.inline("✏ Edit Schedule", "hh_edit"), BTN.inline("💰 Edit Temporary Price", "hh_edit_price")],
+        [BTN.inline("🗑 Delete Schedule", "hh_delete")],
+        [BTN.inline("🔙 Back", "admin_settings")]
+      ]
+    };
+  }
 };
 
 // Safe HTML entity escaping ONLY
@@ -136,8 +153,50 @@ function getChatIdForApi(val) {
 }
 
 // ==========================================
-// 3. DATABASE HELPER FUNCTIONS
+// 3. TIMEZONE & BROADCAST HELPERS
 // ==========================================
+
+function getISTDate() {
+  return new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+}
+
+function getISTTimeStr() {
+  const d = getISTDate();
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+}
+
+async function broadcastToAll(text) {
+  const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
+  (async () => {
+    for (const u of allUsers) {
+      try {
+        await tg.sendMessage(u.telegramId.toString(), text);
+        await new Promise(r => setTimeout(r, 50));
+      } catch (err) {}
+    }
+  })();
+}
+
+// ==========================================
+// 4. DATABASE HELPER FUNCTIONS
+// ==========================================
+
+async function getHappyHour() {
+  const s = await prisma.setting.findUnique({ where: { key: 'HAPPY_HOUR_DATA' } });
+  return s ? JSON.parse(s.value) : null;
+}
+
+async function saveHappyHour(data) {
+  if (!data) {
+    await prisma.setting.deleteMany({ where: { key: 'HAPPY_HOUR_DATA' } });
+  } else {
+    await prisma.setting.upsert({
+      where: { key: 'HAPPY_HOUR_DATA' },
+      update: { value: JSON.stringify(data) },
+      create: { key: 'HAPPY_HOUR_DATA', value: JSON.stringify(data) }
+    });
+  }
+}
 
 async function markUserActive(userId) {
   if (!userId) return;
@@ -375,7 +434,7 @@ async function processReferral(newUserId, referrerPayload) {
 }
 
 // ==========================================
-// 4. EXTERNAL SMS PROVIDER API HELPERS
+// 5. EXTERNAL SMS PROVIDER API HELPERS
 // ==========================================
 
 function buildSmsUrl(params = {}) {
@@ -385,11 +444,11 @@ function buildSmsUrl(params = {}) {
   return url.toString();
 }
 
-async function purchaseSms(settings) {
+async function purchaseSms(settings, overridePrice) {
   try {
     const params = { action: 'getNumber', service: settings.serviceId, country: settings.countryId };
     if (settings.operatorId) params.operator = settings.operatorId;
-    if (String(settings.operatorId) === '9' && settings.maxPrice) params.maxPrice = settings.maxPrice;
+    if (String(settings.operatorId) === '9' && overridePrice) params.maxPrice = overridePrice;
     
     const res = await fetch(buildSmsUrl(params));
     const txt = (await res.text()).trim();
@@ -418,7 +477,7 @@ async function cancelSms(activationId) {
 }
 
 // ==========================================
-// 5. CORE BUSINESS LOGIC
+// 6. CORE BUSINESS LOGIC
 // ==========================================
 
 async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, price, msgId, interval) {
@@ -507,7 +566,7 @@ async function startOtpPolling(chatId, userDbId, orderId, activationId, phone, p
 }
 
 // ==========================================
-// 6. WEBHOOK ROUTES & HANDLERS
+// 7. WEBHOOK ROUTES & HANDLERS
 // ==========================================
 
 async function handleUpdate(update) {
@@ -596,6 +655,59 @@ async function handleUpdate(update) {
 
       // Admin replies
       if (admin) {
+        // --- HAPPY HOUR FLOW ---
+        if (promptText.includes('[KEY_HH_START]')) {
+          if (!/^\d{2}:\d{2}$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid time format. Use HH:MM (24-hour).', { inline_keyboard: [[BTN.inline("🔙 Back", "hh_menu")]] });
+          const draft = hhDrafts.get(userId) || {};
+          draft.startTime = txt;
+          hhDrafts.set(userId, draft);
+          return await tg.sendMessage(chatId, `⏰ Enter End Time:\n(24-hour format, e.g. 16:00)\n\n[KEY_HH_END]`, { reply_markup: { force_reply: true, selective: true } });
+        }
+
+        if (promptText.includes('[KEY_HH_END]')) {
+          if (!/^\d{2}:\d{2}$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid time format. Use HH:MM (24-hour).', { inline_keyboard: [[BTN.inline("🔙 Back", "hh_menu")]] });
+          const draft = hhDrafts.get(userId) || {};
+          if (txt <= draft.startTime) return await tg.sendMessage(chatId, '❌ End Time must be strictly after Start Time.', { inline_keyboard: [[BTN.inline("🔙 Back", "hh_menu")]] });
+          draft.endTime = txt;
+          hhDrafts.set(userId, draft);
+          return await tg.sendMessage(chatId, `💰 Enter Temporary Number Price:\n(e.g. 0.70)\n\n[KEY_HH_PRICE]`, { reply_markup: { force_reply: true, selective: true } });
+        }
+
+        if (promptText.includes('[KEY_HH_PRICE]')) {
+          const price = Number(txt);
+          if (isNaN(price) || price <= 0) return await tg.sendMessage(chatId, '❌ Invalid price.', { inline_keyboard: [[BTN.inline("🔙 Back", "hh_menu")]] });
+          const draft = hhDrafts.get(userId) || {};
+          draft.temporaryPrice = price;
+          hhDrafts.set(userId, draft);
+
+          const smsSettings = await getSmsSettings();
+          const summary = `⏰ <b>Happy Hour Summary</b>\n\n<b>Start:</b>\n${draft.startTime} IST\n\n<b>End:</b>\n${draft.endTime} IST\n\n<b>Temporary Price:</b>\n₹${draft.temporaryPrice.toFixed(2)}\n\n<b>Current Price:</b>\n₹${smsSettings.maxPrice.toFixed(2)}\n\nConfirm?`;
+          
+          return await tg.sendMessage(chatId, summary, {
+             inline_keyboard: [[BTN.inline("✅ Start Happy Hour", "hh_create_confirm"), BTN.inline("❌ Cancel", "hh_menu")]]
+          });
+        }
+
+        if (promptText.includes('[KEY_HH_EDIT_PRICE]')) {
+          const price = Number(txt);
+          if (isNaN(price) || price <= 0) return await tg.sendMessage(chatId, '❌ Invalid price.', { inline_keyboard: [[BTN.inline("🔙 Back", "hh_menu")]] });
+          const hh = await getHappyHour();
+          if (hh) {
+            hh.temporaryPrice = price;
+            hh.announcementSent = true;
+            hh.startedSent = false;
+            hh.endedSent = false;
+            await saveHappyHour(hh);
+            
+            await tg.sendMessage(chatId, `✅ Temporary Price updated to ₹${price.toFixed(2)}.`);
+            const nMsg = `📢 Upcoming Happy Hour!\n\n🔥 Number Price will be only\n₹${hh.temporaryPrice.toFixed(2)}\n\n🕛 Starts\n${hh.startTime} IST\n\n🕓 Ends\n${hh.endTime} IST\n\nDon't miss this limited-time offer.\nBe ready before it starts! 🚀`;
+            await broadcastToAll(nMsg);
+            
+            return await tg.sendMessage(chatId, "Redirecting to Happy Hour Menu...", { inline_keyboard: [[BTN.inline("🔙 Back to Menu", "hh_menu")]] });
+          }
+        }
+        // -----------------------
+
         if (promptText.includes('Enter Telegram User ID to make them a Partner:')) {
           if (!/^\d+$/.test(txt)) return await tg.sendMessage(chatId, '❌ Invalid User ID.');
           await tg.sendMessage(chatId, `🤝 Enter Commission Percentage for Partner ${txt} (e.g., 20):\n[KEY_PARTNER:${txt}]`, { reply_markup: { force_reply: true, selective: true } });
@@ -694,21 +806,9 @@ async function handleUpdate(update) {
         }
 
         if (promptText.includes('Enter broadcast message:')) {
-          const allUsers = await prisma.user.findMany({ select: { telegramId: true } });
-          await tg.sendMessage(chatId, `⏳ Sending broadcast to ${allUsers.length} users in the background...`);
-
-          (async () => {
-            let sent = 0;
-            for (const u of allUsers) {
-              try {
-                await tg.sendMessage(u.telegramId.toString(), txt);
-                sent++;
-                await new Promise(r => setTimeout(r, 50));
-              } catch (err) {}
-            }
-            await tg.sendMessage(chatId, `✅ Broadcast finished. Sent to ${sent}/${allUsers.length} users.`, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
-          })();
-          return;
+          await tg.sendMessage(chatId, `⏳ Sending broadcast in the background...`);
+          await broadcastToAll(txt);
+          return await tg.sendMessage(chatId, `✅ Broadcast background task started.`, { inline_keyboard: [[BTN.inline("🔙 Back", "back_to_admin")]] });
         }
 
         if (promptText.includes('Enter Telegram User ID to manage:')) {
@@ -1033,16 +1133,23 @@ async function handleUpdate(update) {
         const rDataGlobalTx = await getResellerData();
         const myResellerId = rDataGlobalTx.users[userId.toString()];
         const smsSet = await getSmsSettings();
+        const hhState = await getHappyHour();
+        
         let userPrice = smsSet.maxPrice;
+        let smsMaxOverride = null;
 
-        if (myResellerId && rDataGlobalTx.resellers[myResellerId] && rDataGlobalTx.resellers[myResellerId].active) {
+        // Apply Happy Hour pricing uniformly
+        if (hhState && hhState.enabled) {
+            userPrice = hhState.temporaryPrice;
+            smsMaxOverride = hhState.temporaryPrice;
+        } else if (myResellerId && rDataGlobalTx.resellers[myResellerId] && rDataGlobalTx.resellers[myResellerId].active) {
             userPrice = rDataGlobalTx.resellers[myResellerId].price;
         }
         
         if (uBuy.balance.toNumber() < userPrice) return await tg.sendMessage(chatId, M.NO_BALANCE);
         
         const loadMsg = await tg.sendMessage(chatId, M.PURCHASING);
-        const pr = await purchaseSms(smsSet);
+        const pr = await purchaseSms(smsSet, smsMaxOverride);
         if (!pr.success) return await tg.editMessage(chatId, loadMsg?.message_id, M.NUMBER_FAILED);
 
         try {
@@ -1261,15 +1368,11 @@ async function handleUpdate(update) {
     // Prevent duplicate processing entirely for the same callback ID
     if (answeredCallbacks.has(cb.id)) return;
     answeredCallbacks.add(cb.id);
-    // Cleanup memory after 2 minutes (Telegram callbacks usually expire in ~15s anyway)
     setTimeout(() => answeredCallbacks.delete(cb.id), 120000); 
 
-    // Answer immediately before ANY database queries, network requests, or logic
     try { 
       await tg.answerCallbackQuery(cb.id); 
-    } catch (e) {
-      // Silently ignore if already answered or expired (HTTP 400)
-    }
+    } catch (e) {}
 
     const chatId = cb.message?.chat?.id;
     const msgId = cb.message?.message_id;
@@ -1289,6 +1392,137 @@ async function handleUpdate(update) {
     const isRes = !!rDataGlobal.resellers[userId.toString()];
 
     switch (action) {
+      // ==========================================
+      // HAPPY HOUR CALLBACKS
+      // ==========================================
+      case 'hh_menu':
+        if (!admin) return;
+        const hhCurrent = await getHappyHour();
+        const smsCurr = await getSmsSettings();
+        
+        let hhTxt = "⏰ <b>Happy Hour Pricing</b>\n\n";
+        if (hhCurrent) {
+          const state = hhCurrent.enabled ? '🟢 Running' : '🔴 Scheduled / Disabled';
+          hhTxt += `📊 <b>Current Status:</b>\nStatus: ${state}\n\n`;
+          hhTxt += `<b>Start Time:</b> ${hhCurrent.startTime} IST\n`;
+          hhTxt += `<b>End Time:</b> ${hhCurrent.endTime} IST\n\n`;
+          hhTxt += `<b>Temporary Price:</b> ₹${hhCurrent.temporaryPrice.toFixed(2)}\n`;
+          hhTxt += `<b>Original Price:</b> ₹${hhCurrent.originalPrice.toFixed(2)}\n`;
+          hhTxt += `<b>Current System Price:</b> ₹${smsCurr.maxPrice.toFixed(2)}\n\n`;
+          hhTxt += `<b>Upcoming Broadcast:</b> ${hhCurrent.announcementSent ? 'Sent ✅' : 'Pending ⏳'}\n`;
+          hhTxt += `<b>Start Broadcast:</b> ${hhCurrent.startedSent ? 'Sent ✅' : 'Pending ⏳'}\n`;
+          hhTxt += `<b>End Broadcast:</b> ${hhCurrent.endedSent ? 'Sent ✅' : 'Pending ⏳'}\n`;
+        } else {
+          hhTxt += `📊 <b>Current Status:</b>\nNo schedule exists.\n\n<b>Current System Price:</b> ₹${smsCurr.maxPrice.toFixed(2)}\n`;
+        }
+        
+        await tg.editMessage(chatId, msgId, hhTxt, KB.happyHourMenu(!!hhCurrent));
+        break;
+
+      case 'hh_create':
+      case 'hh_edit':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `⏰ Enter Start Time:\n(24-hour format, e.g. 12:00)\n\n[KEY_HH_START]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'hh_edit_price':
+        if (!admin) return;
+        await tg.deleteMessage(chatId, msgId).catch(()=>{});
+        await tg.sendMessage(chatId, `💰 Enter new Temporary Number Price:\n(e.g. 0.70)\n\n[KEY_HH_EDIT_PRICE]`, { reply_markup: { force_reply: true, selective: true } });
+        break;
+
+      case 'hh_create_confirm':
+        if (!admin) return;
+        const draft = hhDrafts.get(userId);
+        if (!draft) return;
+
+        const smsForDraft = await getSmsSettings();
+        const newHh = {
+          startTime: draft.startTime,
+          endTime: draft.endTime,
+          temporaryPrice: draft.temporaryPrice,
+          originalPrice: smsForDraft.maxPrice,
+          enabled: false,
+          announcementSent: true,
+          startedSent: false,
+          endedSent: false
+        };
+        await saveHappyHour(newHh);
+        hhDrafts.delete(userId);
+        
+        await tg.editMessageReplyMarkup(chatId, msgId, { inline_keyboard: [] }).catch(()=>{});
+        await tg.sendMessage(chatId, `✅ <b>Happy Hour Schedule Saved!</b>`, { inline_keyboard: [[BTN.inline("🔙 Back to Menu", "hh_menu")]] });
+        
+        const annMsg = `📢 Upcoming Happy Hour!\n\n🔥 Number Price will be only\n₹${newHh.temporaryPrice.toFixed(2)}\n\n🕛 Starts\n${newHh.startTime} IST\n\n🕓 Ends\n${newHh.endTime} IST\n\nDon't miss this limited-time offer.\nBe ready before it starts! 🚀`;
+        await broadcastToAll(annMsg);
+        break;
+
+      case 'hh_start':
+        if (!admin) return;
+        const hhStart = await getHappyHour();
+        if (hhStart) {
+           const sForStart = await getSmsSettings();
+           hhStart.originalPrice = sForStart.maxPrice;
+           hhStart.enabled = true;
+           hhStart.startedSent = true;
+           await saveHappyHour(hhStart);
+
+           // Change system base price
+           sForStart.maxPrice = hhStart.temporaryPrice;
+           await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(sForStart) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(sForStart) } });
+
+           await tg.answerCallbackQuery(cb.id, { text: "✅ Happy Hour Started Instantly!", show_alert: true }).catch(()=>{});
+           const sMsg = `🎉 Happy Hour Started!\n\n🔥 Number Price\n₹${hhStart.temporaryPrice.toFixed(2)}\n\n⏳ Offer Ends\n${hhStart.endTime} IST\n\nBuy now before the price goes back.`;
+           await broadcastToAll(sMsg);
+           
+           update.callback_query.data = 'hh_menu';
+           return handleUpdate(update);
+        }
+        break;
+
+      case 'hh_stop':
+        if (!admin) return;
+        const hhStop = await getHappyHour();
+        if (hhStop) {
+           const sForStop = await getSmsSettings();
+           sForStop.maxPrice = hhStop.originalPrice;
+           await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(sForStop) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(sForStop) } });
+
+           hhStop.enabled = false;
+           hhStop.endedSent = true;
+           await saveHappyHour(hhStop);
+
+           await tg.answerCallbackQuery(cb.id, { text: "⏹ Happy Hour Stopped Instantly!", show_alert: true }).catch(()=>{});
+           const endMsg = `⏰ Happy Hour Ended\n\nThe special offer has ended.\n\nCurrent Number Price\n₹${sForStop.maxPrice.toFixed(2)}\n\nThank you for using our service ❤️`;
+           await broadcastToAll(endMsg);
+
+           update.callback_query.data = 'hh_menu';
+           return handleUpdate(update);
+        }
+        break;
+
+      case 'hh_delete':
+        if (!admin) return;
+        const hhDel = await getHappyHour();
+        if (hhDel) {
+           if (hhDel.enabled) {
+              const sForDel = await getSmsSettings();
+              sForDel.maxPrice = hhDel.originalPrice;
+              await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(sForDel) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(sForDel) } });
+           }
+           await saveHappyHour(null);
+           await tg.answerCallbackQuery(cb.id, { text: "🗑 Schedule Deleted!", show_alert: true }).catch(()=>{});
+           
+           update.callback_query.data = 'hh_menu';
+           return handleUpdate(update);
+        }
+        break;
+
+      // ==========================================
+      // OTHER EXISTING CALLBACKS
+      // ==========================================
+
       case 'verify_join':
         const isJoined = await checkForceJoin(userId);
         if (isJoined || admin) {
@@ -1299,7 +1533,6 @@ async function handleUpdate(update) {
           }
           await tg.sendMessage(chatId, M.WELCOME, admin ? KB.adminMain : KB.main(isPart, isRes));
         } else {
-          // Changed text from "BOTH the Channel and the Group" to "the required Channel/Group"
           await tg.sendMessage(chatId, "❌ Please join the required Channel/Group to continue.");
         }
         break;
@@ -1371,23 +1604,24 @@ async function handleUpdate(update) {
         }
 
         // ==========================================
-        // RESELLER DEPOSIT LOGIC (₹1 FIXED BASE PRICE)
+        // RESELLER DEPOSIT LOGIC
         // ==========================================
         const rDataDep = await getResellerData();
+        const hhDep = await getHappyHour();
         const rDepId = rDataDep.users[ptIdStr];
         if (rDepId && rDataDep.resellers[rDepId] && rDataDep.resellers[rDepId].active) {
            const myReseller = rDataDep.resellers[rDepId];
            
-           // Reseller ka set kiya hua number price
-           const userPaidPrice = myReseller.price; 
+           let userPaidPrice = myReseller.price; 
+           if (hhDep && hhDep.enabled) {
+              userPaidPrice = hhDep.temporaryPrice; // Override price logic for Reseller profit calculation
+           }
            
-           // Fixed Base Price = ₹1 (Iske upar sab reseller ka profit)
            const basePrice = 1;
            const profitMargin = Math.max(0, userPaidPrice - basePrice);
            let profitOnDeposit = 0;
            
            if (profitMargin > 0 && userPaidPrice > 0) {
-               // Total deposit me se advance profit nikalna
                const profitRatio = profitMargin / userPaidPrice;
                profitOnDeposit = amt * profitRatio;
            }
@@ -1398,8 +1632,6 @@ async function handleUpdate(update) {
            if (profitOnDeposit > 0) {
                myReseller.pending += profitOnDeposit;
                myReseller.earned += profitOnDeposit;
-               
-               // Reseller ko turant notification
                await tg.sendMessage(rDepId, `🎉 <b>Reseller Commission</b>\n\nA referred user deposited ₹${amt}.\n💰 You earned: <code>₹${profitOnDeposit.toFixed(2)}</code>`).catch(()=>{});
            }
            
@@ -2064,7 +2296,53 @@ server.post('/webhook', async (req, reply) => {
 });
 
 // ==========================================
-// 7. GLOBAL ERROR HANDLERS
+// 8. BACKGROUND CRON & POLLING TASKS
+// ==========================================
+
+setInterval(async () => {
+  try {
+    const hh = await getHappyHour();
+    if (!hh) return;
+    
+    const nowStr = getISTTimeStr();
+    const sConf = await getSmsSettings();
+
+    if (nowStr >= hh.startTime && nowStr < hh.endTime) {
+      if (!hh.enabled) {
+         hh.originalPrice = sConf.maxPrice;
+         hh.enabled = true;
+         
+         sConf.maxPrice = hh.temporaryPrice;
+         await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(sConf) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(sConf) } });
+         await saveHappyHour(hh);
+      }
+      if (hh.enabled && !hh.startedSent) {
+         hh.startedSent = true;
+         await saveHappyHour(hh);
+         const sMsg = `🎉 Happy Hour Started!\n\n🔥 Number Price\n₹${hh.temporaryPrice.toFixed(2)}\n\n⏳ Offer Ends\n${hh.endTime} IST\n\nBuy now before the price goes back.`;
+         await broadcastToAll(sMsg);
+      }
+    } else if (nowStr >= hh.endTime && hh.enabled) {
+      sConf.maxPrice = hh.originalPrice;
+      await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(sConf) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(sConf) } });
+
+      hh.enabled = false;
+      await saveHappyHour(hh);
+
+      if (!hh.endedSent) {
+         hh.endedSent = true;
+         await saveHappyHour(hh);
+         const endMsg = `⏰ Happy Hour Ended\n\nThe special offer has ended.\n\nCurrent Number Price\n₹${sConf.maxPrice.toFixed(2)}\n\nThank you for using our service ❤️`;
+         await broadcastToAll(endMsg);
+      }
+    }
+  } catch (error) {
+    server.log.error(`[HAPPY HOUR ERROR]`, error.message);
+  }
+}, 30000); // Check every 30 seconds
+
+// ==========================================
+// 9. GLOBAL ERROR HANDLERS
 // ==========================================
 
 process.on('uncaughtException', (err) => {
@@ -2076,8 +2354,35 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 
 // ==========================================
-// 8. SERVER STARTUP, RESUME & SHUTDOWN
+// 10. SERVER STARTUP, RESUME & SHUTDOWN
 // ==========================================
+
+async function resumeHappyHourState() {
+  try {
+    const hh = await getHappyHour();
+    if (!hh) return;
+    const nowStr = getISTTimeStr();
+    
+    if (nowStr >= hh.startTime && nowStr < hh.endTime) {
+       if (!hh.enabled) {
+          const sConf = await getSmsSettings();
+          hh.originalPrice = sConf.maxPrice;
+          hh.enabled = true;
+          sConf.maxPrice = hh.temporaryPrice;
+          await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(sConf) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(sConf) } });
+          await saveHappyHour(hh);
+       }
+    } else if (nowStr >= hh.endTime && hh.enabled) {
+       const sConf = await getSmsSettings();
+       sConf.maxPrice = hh.originalPrice;
+       await prisma.setting.upsert({ where: { key: 'SMS_SETTINGS' }, update: { value: JSON.stringify(sConf) }, create: { key: 'SMS_SETTINGS', value: JSON.stringify(sConf) } });
+       hh.enabled = false;
+       await saveHappyHour(hh);
+    }
+  } catch (error) {
+    server.log.error('[SERVER] ⚠️ Failed to evaluate Happy Hour state on boot', error);
+  }
+}
 
 async function resumeActiveOrders() {
   try {
@@ -2086,7 +2391,6 @@ async function resumeActiveOrders() {
     
     const smsSet = await getSmsSettings();
     for (const order of activeOrders) {
-      // Re-initialize polling. msgId is null since it's lost from RAM, but text sending fallback is built-in.
       startOtpPolling(
         order.user.telegramId.toString(), 
         order.userId, 
@@ -2119,7 +2423,6 @@ async function setupWebhookWithRetry(baseUrl, secret, maxRetries = 5) {
       }
 
       server.log.info(`[TELEGRAM] Deleting old webhook configuration...`);
-      // Change this to true to kill the old pending broadcasts
       await tg.deleteWebhook({ drop_pending_updates: true }); 
 
       server.log.info(`[TELEGRAM] Registering new webhook: ${finalWebhookUrl}`);
@@ -2149,6 +2452,9 @@ const start = async () => {
     
     // Trigger message database initialization on boot
     await getMessages();
+    
+    // Validate Happy Hour pricing loop states on boot
+    await resumeHappyHourState();
 
     const host = CONFIG.server.host || '0.0.0.0';
     await server.listen({ port: CONFIG.server.port, host });
