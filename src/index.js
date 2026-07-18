@@ -457,7 +457,7 @@ async function processReferral(newUserId, referrerPayload, admin, sys, rData) {
 // ==========================================
 
 async function fetchWithTimeout(url, options = {}) {
-  const timeout = options.timeout || 8000;
+  const timeout = options.timeout || 30000;
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
   try {
